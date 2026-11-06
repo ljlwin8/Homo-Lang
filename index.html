@@ -1,0 +1,1817 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>homo 编译器</title>
+<style>
+  :root {
+    --bg: #0c0f14;
+    --panel: #12161d;
+    --panel-2: #0f1319;
+    --border: #222a36;
+    --text: #e7edf5;
+    --muted: #8a97a8;
+    --accent: #5eead4;
+    --accent-2: #fbbf24;
+    --ok: #34d399;
+    --err: #f87171;
+    --mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    color: var(--text);
+    background:
+      radial-gradient(1100px 520px at 18% -12%, #17212c 0%, rgba(12,15,20,0) 60%),
+      var(--bg);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Noto Sans SC", "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(18, 22, 29, .86);
+    backdrop-filter: blur(8px);
+  }
+  .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .logo {
+    width: 38px; height: 38px;
+    border-radius: 10px;
+    display: grid; place-items: center;
+    background: linear-gradient(145deg, #123e39, #0d2724);
+    border: 1px solid #1e514a;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-weight: 700; font-size: 17px;
+  }
+  .titles h1 { margin: 0; font-size: 15px; letter-spacing: .2px; }
+  .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+  button {
+    appearance: none;
+    background: #1a212c;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 12.5px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: border-color .15s, background .15s, opacity .15s;
+  }
+  button:hover { border-color: #364252; background: #1e2632; }
+  button:disabled { opacity: .55; cursor: default; }
+  button.primary {
+    background: var(--accent);
+    color: #07221e;
+    border-color: transparent;
+    font-weight: 650;
+  }
+  button.primary:hover { filter: brightness(1.06); background: var(--accent); }
+  button.danger { background: #3a1d23; border-color: #6e2b36; color: #ffb3bd; }
+  button.danger:hover { background: #472129; border-color: #8c3744; }
+  button.ghost { background: transparent; border-color: transparent; color: var(--muted); margin-left: auto; }
+  button.ghost:hover { color: var(--text); border-color: var(--border); background: #1a212c; }
+  kbd {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: rgba(0,0,0,.18);
+    margin-left: 3px;
+  }
+
+  main {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .pane + .pane { border-left: 1px solid var(--border); }
+  .pane-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 14px;
+    font-size: 12px;
+    color: var(--muted);
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .pane-head .hint { font-family: var(--mono); font-size: 11px; color: #5f6c7e; }
+
+  .editor-wrap { flex: 1; min-height: 0; display: flex; background: var(--panel-2); overflow: hidden; }
+  .lint-bar {
+    padding: 6px 14px;
+    font: 12px/1.5 var(--mono);
+    color: #ff9d9d;
+    background: rgba(200, 60, 60, 0.14);
+    border-bottom: 1px solid rgba(200, 60, 60, 0.35);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .lint-bar:hover { background: rgba(200, 60, 60, 0.22); }
+  #gutter .ln-err { color: #ff8f8f; font-weight: 700; }
+  #gutter {
+    width: 48px;
+    flex: none;
+    padding: 14px 9px 14px 0;
+    text-align: right;
+    color: #465364;
+    background: #0c1015;
+    border-right: 1px solid var(--border);
+    font: 13px/1.65 var(--mono);
+    white-space: pre;
+    overflow: hidden;
+    user-select: none;
+  }
+  .editor-area { position: relative; flex: 1; min-width: 0; min-height: 0; }
+  /* 自动补全弹层：跟随光标位置，选中项青色底。 */
+  #ac-pop {
+    position: absolute;
+    z-index: 4;
+    min-width: 132px;
+    max-width: 300px;
+    padding: 4px 0;
+    border: 1px solid #33404f;
+    border-radius: 8px;
+    background: #161c26;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, .45);
+    font: 12.5px/1.55 var(--mono);
+    color: var(--text);
+    overflow: hidden;
+  }
+  #ac-pop .ac-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 4px 10px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  #ac-pop .ac-item.sel { background: rgba(94, 234, 212, .16); }
+  #ac-pop .ac-name { overflow: hidden; text-overflow: ellipsis; }
+  #ac-pop .ac-kind { color: #5f6c7e; font-size: 10.5px; flex: none; }
+  #editor, #highlight {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    border: 0;
+    padding: 14px 16px;
+    font: 13px/1.65 var(--mono);
+    white-space: pre;
+    tab-size: 4;
+  }
+  #highlight {
+    overflow: hidden;
+    pointer-events: none;
+    color: #9cdcfe;
+    background: var(--panel-2);
+  }
+  #editor {
+    z-index: 1;
+    resize: none;
+    outline: none;
+    overflow: auto;
+    background: transparent;
+    color: transparent;
+    caret-color: var(--accent);
+  }
+  #editor::selection { background: rgba(94, 234, 212, .22); }
+
+  /* 语法高亮配色：函数/关键字/数组符号紫、变量白、立即数 rgb(182,201,168)、
+     类名青绿、声明前置洋红、文本淡蓝、函数参数橙、注释灰。 */
+  .tok-decl  { color: rgb(239, 131, 119); }
+  .tok-kw    { color: #c678dd; }
+  .tok-op    { color: #c678dd; }
+  .tok-lit   { color: #c678dd; }
+  .tok-fn    { color: #c678dd; }
+  .tok-cls   { color: #4ec9b0; }
+  .tok-param { color: #d19a66; }
+  .tok-loopvar { color: #3b6fe0; }
+  .tok-null  { color: #2e4fd0; }
+  .tok-id    { color: #ffffff; }
+  .tok-sep   { color: #ffffff; }
+  .tok-num   { color: #b6c9a8; }
+  .tok-str   { color: #9cdcfe; }
+  .tok-tpl   { color: #9cdcfe; }
+  .tok-punc  { color: #9cdcfe; }
+  .tok-com   { color: #7f848e; }
+  /* 花括号按嵌套深度循环：黄 → 紫 → 蓝。 */
+  .tok-b0    { color: #ffd866; }
+  .tok-b1    { color: #c678dd; }
+  .tok-b2    { color: #61afef; }
+
+  .tabs {
+    display: flex; align-items: center; gap: 4px;
+    padding: 6px 8px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+  }
+  .tab {
+    background: transparent;
+    border: 1px solid transparent;
+    color: var(--muted);
+    padding: 5px 10px;
+    border-radius: 7px;
+    font-size: 12px;
+  }
+  .tab:hover { color: var(--text); background: #1a212c; }
+  .tab.active { color: var(--text); background: #1b2431; border-color: var(--border); }
+
+  .panels { flex: 1; min-height: 0; position: relative; }
+  .panel {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    padding: 14px 16px;
+    overflow: auto;
+    background: var(--panel-2);
+    color: #d7e1ee;
+    font: 13px/1.65 var(--mono);
+  }
+  #panel-cpp { white-space: pre; }
+  #panel-out { white-space: pre; overflow: auto; }
+  [hidden] { display: none !important; }
+
+  .stdin-bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+  }
+  .stdin-bar .prompt { color: var(--accent); font-family: var(--mono); font-size: 14px; }
+  #stdin-line {
+    flex: 1;
+    min-width: 0;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    background: var(--panel-2);
+    color: var(--text);
+    font: 12.5px var(--mono);
+    outline: none;
+  }
+  #stdin-line:focus { border-color: #2f6f66; box-shadow: 0 0 0 2px rgba(94, 234, 212, .10); }
+  #stdin-line::placeholder { color: #5f6c7e; }
+  .stdin-bar button { padding: 6px 12px; }
+
+  .muted { color: var(--muted); }
+
+  footer {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 7px 16px;
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  .status { display: flex; align-items: center; gap: 8px; }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #5b6675;
+    transition: background .15s, box-shadow .15s;
+  }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 0 4px rgba(52, 211, 153, .12); }
+  .dot.err { background: var(--err); box-shadow: 0 0 0 4px rgba(248, 113, 113, .12); }
+  .dot.busy { background: var(--accent-2); animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .meta { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11px; }
+  .sep { opacity: .45; }
+
+  body.busy { cursor: progress; }
+
+  @media (max-width: 900px) {
+    main { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1.1fr) minmax(0, 1fr); }
+    .pane + .pane { border-left: 0; border-top: 1px solid var(--border); }
+  }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="logo">h</div>
+      <div class="titles">
+        <h1>homo 编译器</h1>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="btn-run" class="primary">运行<kbd>⌘↵</kbd></button>
+      <button id="btn-stop" class="danger" hidden>终止运行</button>
+      <button id="btn-compile">仅编译</button>
+      <button id="btn-open">打开并编译</button>
+      <button id="btn-save">保存 .homo</button>
+      <button id="btn-sample">示例</button>
+      <button id="btn-game">玩扫雷</button>
+      <button id="btn-clear">清空</button>
+      <input type="file" id="file-input" accept=".homo,text/plain" hidden>
+    </div>
+  </header>
+
+  <main>
+    <section class="pane">
+      <div class="pane-head"><span>homo 源码</span><span class="hint" id="file-label">hello.homo</span></div>
+      <div id="lint-bar" class="lint-bar" title="点击跳到出错的行" hidden></div>
+      <div class="editor-wrap">
+        <div id="gutter" aria-hidden="true">1</div>
+        <div class="editor-area">
+          <pre id="highlight" aria-hidden="true"></pre>
+          <textarea id="editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" aria-label="homo 源码编辑器"></textarea>
+          <div id="ac-pop" role="listbox" aria-label="补全建议" hidden></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="pane">
+      <div class="tabs" role="tablist" aria-label="输出面板">
+        <button class="tab active" data-tab="cpp" role="tab">生成的 C++</button>
+        <button class="tab" data-tab="out" role="tab">运行结果</button>
+        <button id="btn-copy" class="ghost" title="复制生成的 C++">复制 C++</button>
+      </div>
+      <div class="panels">
+        <pre id="panel-cpp" class="panel">点击「运行」后，这里会显示翻译出的 C++ 代码。</pre>
+        <pre id="panel-out" class="panel" hidden>点击「运行」查看程序输出。</pre>
+      </div>
+      <form id="stdin-bar" class="stdin-bar" hidden>
+        <span class="prompt">›</span>
+        <input id="stdin-line" type="text" autocomplete="off" spellcheck="false"
+               placeholder="在这里输入，回车发送（例如：3 4）">
+        <button type="submit">发送</button>
+      </form>
+    </section>
+  </main>
+
+  <footer>
+    <div class="status"><span id="status-dot" class="dot"></span><span id="status-text" aria-live="polite">就绪</span></div>
+    <div class="meta">
+      <span id="cursor">行 1，列 1</span><span class="sep">·</span>
+      <span>UTF-8</span><span class="sep">·</span>
+      <span>g++ -std=c++17</span>
+    </div>
+  </footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var editor = document.getElementById("editor");
+  var gutter = document.getElementById("gutter");
+  var highlightEl = document.getElementById("highlight");
+  var statusText = document.getElementById("status-text");
+  var statusDot = document.getElementById("status-dot");
+  var cursorEl = document.getElementById("cursor");
+  var runBtn = document.getElementById("btn-run");
+  var stopBtn = document.getElementById("btn-stop");
+  var compileBtn = document.getElementById("btn-compile");
+  var openBtn = document.getElementById("btn-open");
+  var saveBtn = document.getElementById("btn-save");
+  var sampleBtn = document.getElementById("btn-sample");
+  var gameBtn = document.getElementById("btn-game");
+  var clearBtn = document.getElementById("btn-clear");
+  var copyBtn = document.getElementById("btn-copy");
+  var fileInput = document.getElementById("file-input");
+  var fileLabel = document.getElementById("file-label");
+  var stdinBar = document.getElementById("stdin-bar");
+  var stdinLine = document.getElementById("stdin-line");
+  var busy = false;
+  var sessionId = null;
+  var pollTimer = null;
+  var outputOffset = 0;
+  var stopRequested = false;
+  var currentName = "hello.homo";
+  var lintBar = document.getElementById("lint-bar");
+  var lintLine = 0;
+  var lintTimer = null;
+  var lintSeq = 0;
+  var acPop = document.getElementById("ac-pop");
+
+  function setStatus(text, kind) {
+    statusText.textContent = text;
+    statusDot.className = "dot" + (kind ? " " + kind : "");
+  }
+
+  function renderGutter() {
+    var count = editor.value.split("\n").length;
+    var parts = new Array(count);
+    for (var i = 0; i < count; i++) {
+      var n = i + 1;
+      parts[i] = n === lintLine ? '<span class="ln-err">' + n + "</span>" : String(n);
+    }
+    gutter.innerHTML = parts.join("\n");
+    gutter.scrollTop = editor.scrollTop;
+  }
+
+  function updateGutter() {
+    renderGutter();
+    renderHighlight();
+    scheduleLint();
+  }
+
+  function scheduleLint() {
+    if (lintTimer) clearTimeout(lintTimer);
+    lintTimer = setTimeout(runLint, 600);
+  }
+
+  async function runLint() {
+    lintTimer = null;
+    if (composing) { scheduleLint(); return; }
+    var source = editor.value;
+    var seq = ++lintSeq;
+    if (!source.trim()) { clearLintMessage(); return; }
+    var data;
+    try {
+      data = await postJson("/api/check", { source: source });
+    } catch (err) {
+      return; // 服务不可用时静默，不打断输入
+    }
+    if (seq !== lintSeq || source !== editor.value) return;
+    if (data.ok) clearLintMessage();
+    else showLintMessage(data.line || 0, data.error || "语法错误");
+  }
+
+  function clearLintMessage() {
+    if (!lintLine && lintBar.hidden) return;
+    lintLine = 0;
+    lintBar.hidden = true;
+    lintBar.textContent = "";
+    renderGutter();
+  }
+
+  function showLintMessage(line, message) {
+    lintLine = line || 0;
+    lintBar.textContent = (lintLine ? "第 " + lintLine + " 行：" : "") + message;
+    lintBar.hidden = false;
+    renderGutter();
+  }
+
+  lintBar.addEventListener("click", function () {
+    if (!lintLine) return;
+    var lines = editor.value.split("\n");
+    var idx = Math.min(Math.max(lintLine, 1), lines.length);
+    var offset = 0;
+    for (var i = 0; i < idx - 1; i++) offset += lines[i].length + 1;
+    editor.focus();
+    editor.setSelectionRange(offset, offset);
+    editor.scrollTop = Math.max(0, (idx - 4) * 13 * 1.65);
+    gutter.scrollTop = editor.scrollTop;
+    highlightEl.scrollTop = editor.scrollTop;
+    updateCursor();
+  });
+
+  var HL_WORDS = {
+    "你是一个一个一个": "decl",
+    "一坨": "decl",
+    "哼哼哼啊啊啊啊啊": "sep",
+    "事": "sep",
+    "罢": "sep",
+    "噗叽啪": "sep",
+    "老爷你下面的": "kw",
+    "都白了": "kw",
+    "戳啦": "kw",
+    "戳啦极霸矛嘛": "kw",
+    "嘛": "kw",
+    "极霸矛": "kw",
+    "动起来啊动起来": "kw",
+    "人类有三大欲望": "kw",
+    "食欲": "kw",
+    "性欲睡眠欲": "kw",
+    "是栗老师让我": "kw",
+    "动起来的": "kw",
+    "回啊": "kw",
+    "回数": "loopvar",
+    "回": "kw",
+    "我已经等不及了": "kw",
+    "速达哟": "kw",
+    "人幸终": "kw",
+    "类": "kw",
+    "新建": "kw",
+    "便加": "sep",
+    "便减": "sep",
+    "便乘": "sep",
+    "便除": "sep",
+    "迫真": "op",
+    "撅": "sep",
+    "或": "sep",
+    "且": "sep",
+    "甚至": "sep",
+    "就事": "sep",
+    "确信": "lit",
+    "虚无": "null",
+    "脱出": "fn",
+    "读入": "fn",
+    "读行": "fn",
+    "随机": "fn",
+    "长度": "fn",
+    "取子串": "fn",
+    "查找": "fn",
+    "包含": "fn",
+    "替换": "fn",
+    "分割": "fn",
+    "连接": "fn",
+    "去空白": "fn",
+    "转数字": "fn",
+    "转大写": "fn",
+    "转小写": "fn",
+    "import": "kw",
+    "homocore": "cls"
+  };
+
+  function escHtml(s) {
+    return s.replace(/[&<>]/g, function (c) {
+      return c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;";
+    });
+  }
+
+  function isHlPunct(ch) {
+    return "{}()[],;+-*/.（），".indexOf(ch) >= 0;
+  }
+
+  // 半角/全角引号都能当字符串边界，且可以混用。
+  function isQuoteChar(ch) {
+    return "\"“”‘’'".indexOf(ch) >= 0;
+  }
+  // 与 homo.py 一致：全角引号开头的字符串由同族任意全角/半角引号闭合，
+  // 半角引号开头只由半角或右全角引号闭合。
+  var HL_QUOTE_CLOSERS = {
+    "\"": "\"”", "“": "\"“”", "”": "\"“”",
+    "'": "'’", "‘": "'‘’", "’": "'‘’"
+  };
+  function isQuoteCloser(open, ch) {
+    var s = HL_QUOTE_CLOSERS[open];
+    return !!s && s.indexOf(ch) >= 0;
+  }
+
+  // 与 homo.py 的 tokenize 规则保持一致：注释、字符串、数字、标点、关键字。
+  function highlightHomo(src) {
+    var out = [];
+    var i = 0;
+    var n = src.length;
+
+    function add(kind, text) {
+      if (!text) return;
+      if (kind) out.push('<span class="tok-' + kind + '">' + escHtml(text) + "</span>");
+      else out.push(escHtml(text));
+    }
+
+    function scanString() {
+      var open = src[i];
+      var buf = open;
+      i += 1;
+      while (i < n) {
+        var c = src[i];
+        if (c === "\\" && i + 1 < n) { buf += c + src[i + 1]; i += 2; continue; }
+        if (isQuoteCloser(open, c)) { buf += c; i += 1; add("str", buf); return; }
+        if (c === "{") {
+          add("str", buf);
+          buf = "";
+          add("tpl", "{");
+          i += 1;
+          scanCode(true);
+          if (i < n && src[i] === "}") { add("tpl", "}"); i += 1; }
+          continue;
+        }
+        buf += c;
+        i += 1;
+      }
+      add("str", buf);
+    }
+
+    var scopes = [];
+    var pendingParams = null;
+    var expectClass = false;
+    var bracketDepth = 0;
+
+    function isOpenParen(ch) { return ch === "(" || ch === "（"; }
+
+    // 从 "(" 开始找到配对的 ")"，跳过字符串和注释。
+    function findMatchingParen(p) {
+      var depth = 0;
+      while (p < n) {
+        var c = src[p];
+        if (isQuoteChar(c)) {
+          var open = c;
+          p += 1;
+          while (p < n) {
+            if (src[p] === "\\") { p += 2; continue; }
+            if (isQuoteCloser(open, src[p])) { p += 1; break; }
+            p += 1;
+          }
+          continue;
+        }
+        if (c === "/" && src[p + 1] === "/") {
+          while (p < n && src[p] !== "\n") p += 1;
+          continue;
+        }
+        if (c === "/" && src[p + 1] === "*") {
+          p += 2;
+          while (p < n && !(src[p] === "*" && src[p + 1] === "/")) p += 1;
+          p = Math.min(n, p + 2);
+          continue;
+        }
+        if (isOpenParen(c)) depth += 1;
+        else if (c === ")" || c === "）") {
+          depth -= 1;
+          if (depth === 0) return p;
+        }
+        p += 1;
+      }
+      return -1;
+    }
+
+    // 识别函数定义 name(参数, 参数){，返回参数名列表；普通调用返回 null。
+    function definitionParamsAt(parenPos) {
+      var close = findMatchingParen(parenPos);
+      if (close < 0) return null;
+      var k = close + 1;
+      while (k < n && /\s/.test(src[k])) k += 1;
+      if (src[k] !== "{") return null;
+      return src.slice(parenPos + 1, close).split(/[,，]/).map(function (s) {
+        // 可变参数「一坨 名字」去掉标记，默认参数「名字 事 默认值」只取名字。
+        var t = s.trim().replace(/^一坨\s+/, "").split(/\s/)[0];
+        return t;
+      }).filter(function (s) {
+        return s && !/[\s()（）,，"]/.test(s) && !/^[0-9]/.test(s);
+      });
+    }
+
+    // 先扫一遍本文件里定义的函数/方法名。只有已定义的才是“确定的函数”，
+    // 其余后面跟括号的名字类型未确定，保持变量白色。
+    var definedFns = Object.create(null);
+    (function collectDefinedFns() {
+      var j = 0;
+      while (j < n) {
+        var c = src[j];
+        if (isQuoteChar(c)) {
+          var open = c;
+          j += 1;
+          while (j < n) {
+            if (src[j] === "\\") { j += 2; continue; }
+            if (isQuoteCloser(open, src[j])) { j += 1; break; }
+            j += 1;
+          }
+          continue;
+        }
+        if (c === "/" && src[j + 1] === "/") {
+          while (j < n && src[j] !== "\n") j += 1;
+          continue;
+        }
+        if (c === "/" && src[j + 1] === "*") {
+          j += 2;
+          while (j < n && !(src[j] === "*" && src[j + 1] === "/")) j += 1;
+          j = Math.min(n, j + 2);
+          continue;
+        }
+        if (isHlPunct(c) || /\s/.test(c)) { j += 1; continue; }
+        var wStart = j;
+        while (j < n && !/\s/.test(src[j]) && !isHlPunct(src[j]) && !isQuoteChar(src[j])) j += 1;
+        var w = src.slice(wStart, j);
+        var p = j;
+        while (p < n && /\s/.test(src[p])) p += 1;
+        if (p < n && isOpenParen(src[p]) && definitionParamsAt(p) !== null) {
+          definedFns[w] = true;
+        }
+      }
+    })();
+
+    function scanCode(stopAtBrace) {
+      var plain = "";
+      function flush() {
+        if (plain) { add(null, plain); plain = ""; }
+      }
+      while (i < n) {
+        var c = src[i];
+        if (stopAtBrace && c === "}") { flush(); return; }
+        if (c === "/" && src[i + 1] === "/") {
+          flush();
+          var j = i;
+          while (j < n && src[j] !== "\n") j += 1;
+          add("com", src.slice(i, j));
+          i = j;
+          continue;
+        }
+        if (c === "/" && src[i + 1] === "*") {
+          flush();
+          var k = i + 2;
+          while (k < n && !(src[k] === "*" && src[k + 1] === "/")) k += 1;
+          k = Math.min(n, k + 2);
+          add("com", src.slice(i, k));
+          i = k;
+          continue;
+        }
+        if (isQuoteChar(c)) { flush(); scanString(); continue; }
+        if (c >= "0" && c <= "9") {
+          flush();
+          var m = i + 1;
+          while (m < n && ((src[m] >= "0" && src[m] <= "9") || src[m] === ".")) m += 1;
+          add("num", src.slice(i, m));
+          i = m;
+          continue;
+        }
+        if (c === "+" || c === "-" || c === "*" || c === "/") {
+          flush();
+          add("sep", c);
+          i += 1;
+          continue;
+        }
+        if (c === "{") {
+          flush();
+          add("b" + (scopes.length % 3), c);
+          scopes.push(pendingParams);
+          pendingParams = null;
+          i += 1;
+          continue;
+        }
+        if (c === "}") {
+          flush();
+          add("b" + (Math.max(0, scopes.length - 1) % 3), c);
+          if (scopes.length) scopes.pop();
+          i += 1;
+          continue;
+        }
+        if (c === "(" || c === "（" || c === "[") {
+          flush();
+          add("b" + ((scopes.length + bracketDepth) % 3), c);
+          bracketDepth += 1;
+          i += 1;
+          continue;
+        }
+        if (c === ")" || c === "）" || c === "]") {
+          flush();
+          bracketDepth = Math.max(0, bracketDepth - 1);
+          add("b" + ((scopes.length + bracketDepth) % 3), c);
+          i += 1;
+          continue;
+        }
+        if (isHlPunct(c)) { flush(); add("punc", c); i += 1; continue; }
+        if (/\s/.test(c)) { plain += c; i += 1; continue; }
+        var start = i;
+        while (i < n && !/\s/.test(src[i]) && !isHlPunct(src[i]) && !isQuoteChar(src[i])) i += 1;
+        if (i === start) { plain += src[i]; i += 1; continue; }
+        flush();
+        var word = src.slice(start, i);
+        var q = i;
+        while (q < n && /\s/.test(src[q])) q += 1;
+        var hasCall = q < n && isOpenParen(src[q]);
+        var kind = HL_WORDS[word];
+        var wantClass = expectClass;
+        expectClass = false;
+        if (!kind) {
+          if (pendingParams && pendingParams.indexOf(word) >= 0) kind = "param";
+          else if (wantClass) kind = "cls";
+          else if (hasCall && definedFns[word]) kind = "fn";
+          else {
+            kind = "id";
+            for (var s = 0; s < scopes.length; s += 1) {
+              if (scopes[s] && scopes[s].indexOf(word) >= 0) { kind = "param"; break; }
+            }
+          }
+          if (hasCall) {
+            var params = definitionParamsAt(q);
+            if (params) pendingParams = params;
+          }
+        }
+        add(kind, word);
+        if (word === "类" || word === "新建") expectClass = true;
+      }
+      flush();
+    }
+
+    scanCode(false);
+    return out.join("");
+  }
+
+  function renderHighlight() {
+    highlightEl.innerHTML = highlightHomo(editor.value) + "\n";
+    syncHighlightBox();
+    highlightEl.scrollTop = editor.scrollTop;
+    highlightEl.scrollLeft = editor.scrollLeft;
+  }
+
+  // 高亮层没有滚动条，用内边距补齐 textarea 滚动条占掉的可视区域，滚动范围才能一致。
+  function syncHighlightBox() {
+    var sbW = Math.max(0, editor.offsetWidth - editor.clientWidth);
+    var sbH = Math.max(0, editor.offsetHeight - editor.clientHeight);
+    highlightEl.style.paddingRight = (16 + sbW) + "px";
+    highlightEl.style.paddingBottom = (14 + sbH) + "px";
+  }
+
+  window.addEventListener("resize", function () {
+    syncHighlightBox();
+    highlightEl.scrollTop = editor.scrollTop;
+    highlightEl.scrollLeft = editor.scrollLeft;
+  });
+
+  function updateCursor() {
+    var pos = editor.selectionStart;
+    var before = editor.value.slice(0, pos);
+    var lines = before.split("\n");
+    cursorEl.textContent = "行 " + lines.length + "，列 " + (lines[lines.length - 1].length + 1);
+  }
+
+  function setPanelText(id, text) {
+    document.getElementById("panel-" + id).textContent = text;
+  }
+
+  function activateTab(name) {
+    var tabs = document.querySelectorAll(".tab");
+    for (var i = 0; i < tabs.length; i++) {
+      tabs[i].classList.toggle("active", tabs[i].getAttribute("data-tab") === name);
+    }
+    var names = ["cpp", "out"];
+    for (var j = 0; j < names.length; j++) {
+      document.getElementById("panel-" + names[j]).hidden = names[j] !== name;
+    }
+  }
+
+  function showParseError(data) {
+    var where = data.line ? "（第 " + data.line + " 行）" : "";
+    setPanelText("out", "语法错误" + where + "：" + data.error);
+    setStatus("语法错误", "err");
+    activateTab("out");
+    showLintMessage(data.line || 0, data.error || "语法错误");
+  }
+
+  function showCompileError(data) {
+    setPanelText("cpp", data.cpp || "");
+    var output = data.compile_output || data.error || "编译失败";
+    setPanelText("out", output);
+    setStatus("编译失败", "err");
+    activateTab("out");
+    var m = /homo 源码第 (\d+) 行/.exec(output);
+    var firstLine = output.split("\n")[0].trim();
+    showLintMessage(m ? parseInt(m[1], 10) : 0, firstLine || "编译失败");
+  }
+
+  async function post(path, extra) {
+    var body = { source: editor.value };
+    if (extra) {
+      for (var k in extra) {
+        if (Object.prototype.hasOwnProperty.call(extra, k)) body[k] = extra[k];
+      }
+    }
+    var res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    var data;
+    try { data = await res.json(); } catch (e) { throw new Error("服务器返回的不是 JSON"); }
+    if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+    return data;
+  }
+
+  function setBusy(value, stoppable) {
+    busy = value;
+    document.body.classList.toggle("busy", value);
+    runBtn.disabled = value;
+    compileBtn.disabled = value;
+    openBtn.disabled = value;
+    saveBtn.disabled = value;
+    sampleBtn.disabled = value;
+    gameBtn.disabled = value;
+    clearBtn.disabled = value;
+    stopBtn.hidden = !stoppable;
+    stopBtn.disabled = !stoppable;
+  }
+
+  async function postJson(path, payload) {
+    var res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    var data;
+    try { data = await res.json(); } catch (e) { throw new Error("服务器返回的不是 JSON"); }
+    if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+    return data;
+  }
+
+  function errorText(err) {
+    if (err && err.name === "TypeError") return "连接不到编译服务，请刷新页面后重试";
+    return (err && err.message) || String(err);
+  }
+
+  function appendOutput(text) {
+    var panel = document.getElementById("panel-out");
+    var stick = panel.scrollTop + panel.clientHeight >= panel.scrollHeight - 24;
+    panel.textContent += text;
+    if (stick) panel.scrollTop = panel.scrollHeight;
+  }
+
+  function showInput() {
+    stdinBar.hidden = false;
+    stdinLine.focus();
+  }
+
+  function hideInput() {
+    stdinBar.hidden = true;
+    stdinLine.value = "";
+  }
+
+  async function closeSession(sid) {
+    if (!sid) return;
+    try {
+      await postJson("/api/close", { sessionId: sid });
+    } catch (e) { /* 会话可能已经结束 */ }
+  }
+
+  function finishSession(info) {
+    var sid = sessionId;
+    sessionId = null;
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    hideInput();
+    if (info && info.stopped) {
+      appendOutput("\n[已终止运行]\n");
+      setStatus("已终止运行", "err");
+    } else {
+      var code = info ? info.exit_code : null;
+      var shown = code === null || code === undefined ? "未知" : code;
+      setStatus("运行结束（退出码 " + shown + "）", code === 0 ? "ok" : "err");
+    }
+    setBusy(false);
+    stopRequested = false;
+    closeSession(sid);
+  }
+
+  async function pollOutput() {
+    var sid = sessionId;
+    if (!sid) return;
+    try {
+      var res = await fetch("/api/output?sessionId=" + encodeURIComponent(sid) + "&offset=" + outputOffset);
+      var data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || ("HTTP " + res.status));
+      if (sessionId !== sid) return;
+      if (data.text) {
+        appendOutput(data.text);
+        outputOffset = data.offset;
+      }
+      if (data.done) { finishSession(data); return; }
+      setStatus("运行中…可在下方输入", "busy");
+    } catch (err) {
+      if (sessionId !== sid) return;
+      appendOutput("\n[读取输出失败：" + errorText(err) + "]\n");
+      finishSession({ exit_code: null });
+      return;
+    }
+    pollTimer = setTimeout(pollOutput, 200);
+  }
+
+  async function runProgram() {
+    if (busy) return;
+    setBusy(true, true);
+    stopRequested = false;
+    sessionId = null;
+    outputOffset = 0;
+    setStatus("编译并启动中…", "busy");
+    try {
+      var data = await post("/api/run");
+      if (data.phase === "parse") { showParseError(data); return; }
+      if (!data.ok) { showCompileError(data); return; }
+
+      setPanelText("cpp", data.cpp || "");
+      setPanelText("out", "");
+      clearLintMessage();
+      if (data.compile_output) appendOutput("[编译器提示]\n" + data.compile_output + "\n");
+      sessionId = data.sessionId;
+      activateTab("out");
+      setStatus("运行中…可在下方输入", "busy");
+      showInput();
+      if (stopRequested) stopSession(sessionId).catch(function () {});
+      pollOutput();
+    } catch (err) {
+      setStatus("请求失败：" + errorText(err), "err");
+    } finally {
+      if (!sessionId) setBusy(false);
+    }
+  }
+
+  async function stopSession(sid) {
+    var data = await postJson("/api/stop", { sessionId: sid });
+    if (!data.ok) throw new Error(data.error || "终止失败");
+  }
+
+  async function stopRun() {
+    stopRequested = true;
+    if (!sessionId) return;  // 还在编译，启动后会自动终止
+    stopBtn.disabled = true;
+    setStatus("正在终止…", "busy");
+    try {
+      await stopSession(sessionId);
+    } catch (err) {
+      setStatus("终止失败：" + errorText(err), "err");
+      stopBtn.disabled = false;
+    }
+  }
+
+  async function compileOnly() {
+    if (busy) return;
+    setBusy(true);
+    setStatus("编译中…", "busy");
+    try {
+      var data = await post("/api/compile");
+      if (data.phase === "parse") { showParseError(data); return; }
+      if (!data.ok) { showCompileError(data); return; }
+      setPanelText("cpp", data.cpp || "");
+      setPanelText("out", "编译成功，未运行。" + (data.compile_output ? "\n\n[编译器提示]\n" + data.compile_output : ""));
+      clearLintMessage();
+      activateTab("cpp");
+      setStatus("编译成功", "ok");
+    } catch (err) {
+      setStatus("请求失败：" + errorText(err), "err");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function loadSample() {
+    try {
+      var res = await fetch("/api/sample");
+      var data = await res.json();
+      editor.value = data.source || "";
+      currentName = "test.homo";
+      fileLabel.textContent = currentName;
+      updateGutter();
+      updateCursor();
+      setStatus("已载入 test.homo", "ok");
+    } catch (err) {
+      setStatus("载入示例失败：" + errorText(err), "err");
+    }
+  }
+
+  async function loadGame() {
+    if (busy) return;
+    try {
+      var res = await fetch("/api/sample?name=minesweeper.homo");
+      var data = await res.json();
+      if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+      editor.value = data.source || "";
+      currentName = "minesweeper.homo";
+      fileLabel.textContent = currentName;
+      updateGutter();
+      updateCursor();
+      await runProgram();
+    } catch (err) {
+      setStatus("载入扫雷失败：" + errorText(err), "err");
+    }
+  }
+
+  function downloadFile(name, text) {
+    var blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+
+  async function saveFile() {
+    var name = currentName || "hello.homo";
+    if (!/\.homo$/i.test(name)) name += ".homo";
+    var text = editor.value;
+    if (window.showSaveFilePicker) {
+      try {
+        var handle = await window.showSaveFilePicker({
+          suggestedName: name,
+          types: [{ description: "homo 源文件", accept: { "text/plain": [".homo"] } }]
+        });
+        var writable = await handle.createWritable();
+        await writable.write(text);
+        await writable.close();
+        currentName = handle.name;
+        fileLabel.textContent = currentName;
+        setStatus("已保存 " + currentName, "ok");
+        return;
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+        // 浏览器不支持或写入失败时，退回到普通下载。
+      }
+    }
+    downloadFile(name, text);
+    setStatus("已保存 " + name, "ok");
+  }
+
+  function openFile() {
+    fileInput.value = "";
+    fileInput.click();
+  }
+
+  fileInput.addEventListener("change", async function () {
+    if (busy) return;
+    var file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    try {
+      var text = await file.text();
+      editor.value = text;
+      currentName = file.name || "hello.homo";
+      fileLabel.textContent = currentName;
+      updateGutter();
+      updateCursor();
+      setStatus("正在编译 " + currentName + "…", "busy");
+      await compileOnly();
+    } catch (err) {
+      setStatus("打开文件失败：" + errorText(err), "err");
+    }
+  });
+
+  async function copyCpp() {
+    var text = document.getElementById("panel-cpp").textContent || "";
+    if (!text) { setStatus("还没有生成代码", "err"); return; }
+    try {
+      await navigator.clipboard.writeText(text);
+      setStatus("已复制生成的 C++", "ok");
+    } catch (err) {
+      setStatus("复制失败，请手动选择", "err");
+    }
+  }
+
+  var AUTO_PAIRS = { "{": "}", "(": ")", "[": "]", "（": "）" };
+  var PAIR_CLOSERS = { "}": "}", ")": ")", "]": "]", "）": "）" };
+  var QUOTE_PAIRS = { "\"": "\"", "'": "'", "“": "”", "‘": "’" };
+  var QUOTE_CLOSERS = { "\"": "\"", "'": "'", "”": "”", "’": "’" };
+  var QUOTE_CHARS = "\"“”‘’'";
+  // 引号家族：双引号三种写法一类，单引号三种写法一类；跨宽度的同族引号可以互相闭合。
+  var QUOTE_FAMILY = { "\"": 1, "“": 1, "”": 1, "'": 2, "‘": 2, "’": 2 };
+  function quoteFamily(ch) { return QUOTE_FAMILY[ch] || 0; }
+  var INDENT_UNIT = "    ";
+  var autoPairing = false;
+
+  // 光标前未闭合的括号层数；字符串、注释里的括号不算。
+  function scopeDepthAt(src, pos) {
+    var depth = 0, i = 0;
+    while (i < pos) {
+      var c = src[i];
+      if (isQuoteChar(c)) {
+        var open = c;
+        i += 1;
+        while (i < pos) {
+          if (src[i] === "\\") { i += 2; continue; }
+          if (isQuoteCloser(open, src[i])) { i += 1; break; }
+          i += 1;
+        }
+        continue;
+      }
+      if (c === "/" && src[i + 1] === "/") {
+        while (i < pos && src[i] !== "\n") i += 1;
+        continue;
+      }
+      if (c === "/" && src[i + 1] === "*") {
+        i += 2;
+        while (i < pos && !(src[i] === "*" && src[i + 1] === "/")) i += 1;
+        i = Math.min(pos, i + 2);
+        continue;
+      }
+      if (c === "{" || c === "(" || c === "（" || c === "[") depth += 1;
+      else if (c === "}" || c === ")" || c === "）" || c === "]") depth = Math.max(0, depth - 1);
+      i += 1;
+    }
+    return depth;
+  }
+
+  // 用 execCommand 插入才能保留浏览器原生撤销栈。
+  function insertTextAtCaret(text) {
+    var start = editor.selectionStart, end = editor.selectionEnd;
+    var ok = false;
+    try {
+      editor.setSelectionRange(start, end);
+      ok = document.execCommand("insertText", false, text);
+    } catch (err) {
+      ok = false;
+    }
+    if (!ok) {
+      editor.setRangeText(text, start, end, "end");
+      updateGutter();
+    }
+  }
+
+  // 删掉刚敲进去的重复闭合符号，把光标移到已有那只的后面。
+  function skipTypedDuplicate() {
+    var pos = editor.selectionStart;
+    editor.setSelectionRange(pos - 1, pos);
+    var removed = false;
+    try {
+      removed = document.execCommand("delete");
+    } catch (err) {
+      removed = false;
+    }
+    if (!removed) editor.setRangeText("", pos - 1, pos, "start");
+    editor.setSelectionRange(pos, pos);
+    updateGutter();
+    updateCursor();
+  }
+
+  // 中文输入法里的「」不是 homo 语法：在代码区敲「 时换成 { 并自动补出 }，
+  // 敲」 时换成 }；正前方已有自动补出的 } 就直接跳过去。
+  function convertCornerBracket(closing) {
+    var pos = editor.selectionStart;
+    if (pos < 1 || pos !== editor.selectionEnd) return;
+    var value = editor.value;
+    if (value.charAt(pos - 1) !== (closing ? "」" : "「")) return;
+    if (codeContextAt(value, pos - 1) !== "code") return;
+    if (closing) {
+      if (value.charAt(pos) === "}") {
+        // 正前方就是自动补出的 }：只删掉刚输入的「」，光标跳过这个 }。
+        editor.setSelectionRange(pos - 1, pos);
+        var removed = false;
+        try {
+          removed = document.execCommand("delete");
+        } catch (err) {
+          removed = false;
+        }
+        if (!removed) editor.setRangeText("", pos - 1, pos, "start");
+        editor.setSelectionRange(pos, pos);
+      } else {
+        editor.setSelectionRange(pos - 1, pos);
+        autoPairing = true;
+        try {
+          insertTextAtCaret("}");
+        } finally {
+          autoPairing = false;
+        }
+        editor.setSelectionRange(pos, pos);
+      }
+    } else {
+      editor.setSelectionRange(pos - 1, pos);
+      autoPairing = true;
+      try {
+        insertTextAtCaret("{");
+      } finally {
+        autoPairing = false;
+      }
+      autoPairing = true;
+      try {
+        insertTextAtCaret("}");
+      } finally {
+        autoPairing = false;
+      }
+      editor.setSelectionRange(pos, pos);
+    }
+    updateGutter();
+    updateCursor();
+  }
+
+  // 除了直接键入，输入法提交、系统智能引号替换（insertReplacementText）等也要参与补对。
+  var PAIR_INPUT_TYPES = {
+    insertText: true,
+    insertReplacementText: true,
+    insertCompositionText: true,
+    insertFromComposition: true
+  };
+
+  editor.addEventListener("input", function (e) {
+    updateGutter();
+    updateCursor();
+
+    var d = e.data;
+    if (!d || d.length !== 1) return;
+    if (e.isComposing || !PAIR_INPUT_TYPES[e.inputType]) return;
+    if (autoPairing) return;
+    var pos = editor.selectionStart;
+    var value = editor.value;
+
+    if (d === "「" || d === "」") {
+      convertCornerBracket(d === "」");
+      return;
+    }
+
+    // 全角右括号经输入法提交时不会走 keydown，这里补上“跳过已有右括号”的行为：
+    // 刚输入的右括号正前方已经有一只同种右括号，就把刚输入的这只删掉、光标移到后面。
+    if (PAIR_CLOSERS[d] && value.charAt(pos - 1) === d && value.charAt(pos) === d) {
+      skipTypedDuplicate();
+      return;
+    }
+
+    // 引号：成对补全，再敲同族引号就跳过（半角/全角可以混用，同类引号都算已闭合）。
+    var quoteClose = QUOTE_PAIRS[d];
+    if (quoteClose) {
+      if (value.charAt(pos - 1) !== d) return;
+      if (quoteFamily(value.charAt(pos)) === quoteFamily(d)) {
+        skipTypedDuplicate();
+        return;
+      }
+      // 引号闭合：前面紧挨着字母/数字/汉字时只输入一只，不再补对。
+      if (d === "\"" || d === "'") {
+        var prev = value.charAt(pos - 2);
+        if (/[0-9A-Za-z_一-鿿]/.test(prev)) return;
+      }
+      autoPairing = true;
+      try {
+        insertTextAtCaret(quoteClose);
+      } finally {
+        autoPairing = false;
+      }
+      editor.setSelectionRange(pos, pos);
+      updateGutter();
+      updateCursor();
+      return;
+    }
+
+    // 全角右引号：后面已经有同族引号时跳过。
+    if (QUOTE_CLOSERS[d]) {
+      if (quoteFamily(value.charAt(pos)) === quoteFamily(d)) skipTypedDuplicate();
+      return;
+    }
+
+    if (!AUTO_PAIRS[d]) return;
+    if (value.charAt(pos - 1) !== d) return;
+    var closer = AUTO_PAIRS[d];
+    autoPairing = true;
+    try {
+      insertTextAtCaret(closer);
+    } finally {
+      autoPairing = false;
+    }
+    editor.setSelectionRange(pos, pos);
+    updateGutter();
+    updateCursor();
+  });
+
+  // 输入法提交全角标点时，浏览器给出的 input 事件往往不是 insertText（或仍带
+  // isComposing），上面的自动补全不会触发；这里在合成结束后补一次。
+  editor.addEventListener("compositionend", function () {
+    setTimeout(function () {
+      if (autoPairing) return;
+      var pos = editor.selectionStart;
+      if (pos <= 0 || pos !== editor.selectionEnd) return;
+      var value = editor.value;
+      var d = value.charAt(pos - 1);
+      if (d === "「" || d === "」") {
+        convertCornerBracket(d === "」");
+        return;
+      }
+      var closer = QUOTE_PAIRS[d] || AUTO_PAIRS[d];
+      if (!closer) return;
+      var follow = value.charAt(pos);
+      if (QUOTE_PAIRS[d]) {
+        if (quoteFamily(follow) === quoteFamily(d)) return;
+        if ((d === "\"" || d === "'") && /[0-9A-Za-z_一-鿿]/.test(value.charAt(pos - 2))) return;
+      } else if (follow === closer) {
+        return;
+      }
+      autoPairing = true;
+      try {
+        insertTextAtCaret(closer);
+      } finally {
+        autoPairing = false;
+      }
+      editor.setSelectionRange(pos, pos);
+      updateGutter();
+      updateCursor();
+    }, 0);
+  });
+  // ---- 自动补全 ----
+  // 候选：homo 关键字/内置函数 + 文档里出现过的名字（变量、函数、类、方法）。
+  var AC_KIND_LABELS = {
+    decl: "声明", sep: "语法", kw: "关键字", op: "运算符",
+    lit: "字面量", fn: "内置", cls: "类名", loopvar: "循环变量",
+    null: "空值"
+  };
+  var AC_KEYWORDS = Object.keys(HL_WORDS).map(function (w) {
+    return { text: w, kind: AC_KIND_LABELS[HL_WORDS[w]] || "关键字" };
+  });
+  var AC_MAX = 9;
+
+  function isIdentChar(ch) {
+    return /[0-9A-Za-z_一-鿿]/.test(ch);
+  }
+
+  // pos 处在代码、字符串还是注释里；字符串模板 {…} 内按代码处理。
+  function codeContextAt(src, pos) {
+    var i = 0, open = null, blockComment = false, tmpl = [];
+    while (i < pos) {
+      var c = src[i];
+      if (open) {
+        if (c === "\\") { i += 2; continue; }
+        if (isQuoteCloser(open, c)) { open = null; i += 1; continue; }
+        if (c === "{") { tmpl.push(open); open = null; i += 1; continue; }
+        i += 1;
+        continue;
+      }
+      if (blockComment) {
+        if (c === "*" && src[i + 1] === "/") { blockComment = false; i += 2; }
+        else i += 1;
+        continue;
+      }
+      if (c === "/" && src[i + 1] === "/") {
+        while (i < pos && src[i] !== "\n") i += 1;
+        if (i >= pos) return "comment";
+        continue;
+      }
+      if (c === "/" && src[i + 1] === "*") { blockComment = true; i += 2; continue; }
+      if (isQuoteChar(c)) { open = c; i += 1; continue; }
+      if (c === "}" && tmpl.length) { open = tmpl.pop(); i += 1; continue; }
+      i += 1;
+    }
+    if (blockComment) return "comment";
+    if (open) return "string";
+    return "code";
+  }
+
+  // 扫描文档里代码部分的标识符，跳过字符串、注释和关键字。
+  function collectDocNames(src) {
+    var seen = Object.create(null);
+    var list = [];
+    var i = 0, n = src.length;
+    while (i < n) {
+      var c = src[i];
+      if (isQuoteChar(c)) {
+        var open = c;
+        i += 1;
+        while (i < n) {
+          if (src[i] === "\\") { i += 2; continue; }
+          if (isQuoteCloser(open, src[i])) { i += 1; break; }
+          i += 1;
+        }
+        continue;
+      }
+      if (c === "/" && src[i + 1] === "/") {
+        while (i < n && src[i] !== "\n") i += 1;
+        continue;
+      }
+      if (c === "/" && src[i + 1] === "*") {
+        i += 2;
+        while (i < n && !(src[i] === "*" && src[i + 1] === "/")) i += 1;
+        i = Math.min(n, i + 2);
+        continue;
+      }
+      if (isHlPunct(c) || /\s/.test(c)) { i += 1; continue; }
+      var start = i;
+      while (i < n && !/\s/.test(src[i]) && !isHlPunct(src[i]) && !isQuoteChar(src[i])) i += 1;
+      var w = src.slice(start, i);
+      if (w && !HL_WORDS[w] && !/^[0-9]/.test(w) && !seen[w]) {
+        seen[w] = true;
+        list.push({ text: w, kind: "名字" });
+      }
+    }
+    return list;
+  }
+
+  var acItems = [];
+  var acIndex = 0;
+  var acStart = 0;
+  var acCaret = 0;
+  var acOpen = false;
+  var acAccepting = false;
+  var measureCtx = document.createElement("canvas").getContext("2d");
+
+  function hideCompletions() {
+    acOpen = false;
+    acItems = [];
+    acPop.hidden = true;
+    acPop.textContent = "";
+  }
+
+  function completionCandidates(prefix) {
+    var seen = Object.create(null);
+    var out = [];
+    function consider(item) {
+      if (!item.text || item.text === prefix) return;
+      if (item.text.slice(0, prefix.length) !== prefix) return;
+      if (seen[item.text]) return;
+      seen[item.text] = true;
+      out.push(item);
+    }
+    for (var i = 0; i < AC_KEYWORDS.length; i++) consider(AC_KEYWORDS[i]);
+    var names = collectDocNames(editor.value);
+    for (var j = 0; j < names.length; j++) consider(names[j]);
+    out.sort(function (a, b) {
+      return a.text.length - b.text.length ||
+        (a.text < b.text ? -1 : a.text > b.text ? 1 : 0);
+    });
+    return out.slice(0, AC_MAX);
+  }
+
+  function refreshCompletions() {
+    if (document.activeElement !== editor) { hideCompletions(); return; }
+    if (editor.selectionStart !== editor.selectionEnd) { hideCompletions(); return; }
+    var value = editor.value;
+    var caret = editor.selectionStart;
+    if (codeContextAt(value, caret) !== "code") { hideCompletions(); return; }
+    var start = caret;
+    while (start > 0 && isIdentChar(value.charAt(start - 1))) start -= 1;
+    var prefix = value.slice(start, caret);
+    if (!prefix || /^[0-9]+$/.test(prefix)) { hideCompletions(); return; }
+    var items = completionCandidates(prefix);
+    if (!items.length) { hideCompletions(); return; }
+    acItems = items;
+    acIndex = 0;
+    acStart = start;
+    acCaret = caret;
+    renderCompletions();
+  }
+
+  function renderCompletions() {
+    acPop.textContent = "";
+    for (var i = 0; i < acItems.length; i++) {
+      var row = document.createElement("div");
+      row.className = "ac-item" + (i === acIndex ? " sel" : "");
+      row.setAttribute("role", "option");
+      row.setAttribute("data-i", String(i));
+      var name = document.createElement("span");
+      name.className = "ac-name";
+      name.textContent = acItems[i].text;
+      var kind = document.createElement("span");
+      kind.className = "ac-kind";
+      kind.textContent = acItems[i].kind;
+      row.appendChild(name);
+      row.appendChild(kind);
+      acPop.appendChild(row);
+    }
+    acOpen = true;
+    acPop.hidden = false;
+    positionCompletions();
+  }
+
+  function positionCompletions() {
+    var cs = getComputedStyle(editor);
+    var value = editor.value;
+    var caret = acCaret;
+    var lineStart = value.lastIndexOf("\n", caret - 1) + 1;
+    var lineNo = (value.slice(0, lineStart).match(/\n/g) || []).length;
+    measureCtx.font = cs.fontSize + " " + cs.fontFamily;
+    var width = measureCtx.measureText(value.slice(lineStart, caret)).width;
+    var lh = parseFloat(cs.lineHeight) || 21.45;
+    var padL = parseFloat(cs.paddingLeft) || 16;
+    var padT = parseFloat(cs.paddingTop) || 14;
+    var x = padL + width - editor.scrollLeft;
+    var y = padT + (lineNo + 1) * lh - editor.scrollTop;
+    var h = acPop.offsetHeight;
+    if (y + h > editor.clientHeight - 4) {
+      y = padT + lineNo * lh - editor.scrollTop - h - 4;
+    }
+    if (y < 4) y = 4;
+    if (y + h > editor.clientHeight - 4) {
+      y = Math.max(4, editor.clientHeight - h - 4);
+    }
+    var maxX = editor.clientWidth - acPop.offsetWidth - 4;
+    if (x > maxX) x = maxX;
+    acPop.style.left = Math.max(2, x) + "px";
+    acPop.style.top = y + "px";
+  }
+
+  function moveCompletion(delta) {
+    if (!acOpen || !acItems.length) return;
+    acIndex = (acIndex + delta + acItems.length) % acItems.length;
+    var rows = acPop.children;
+    for (var i = 0; i < rows.length; i++) rows[i].classList.toggle("sel", i === acIndex);
+  }
+
+  function acceptCompletion() {
+    if (!acOpen || !acItems.length) return;
+    var text = acItems[acIndex].text;
+    var caret = editor.selectionStart;
+    if (caret !== editor.selectionEnd) { hideCompletions(); return; }
+    var value = editor.value;
+    var start = caret;
+    while (start > 0 && isIdentChar(value.charAt(start - 1))) start -= 1;
+    hideCompletions();
+    editor.setSelectionRange(start, caret);
+    acAccepting = true;
+    try {
+      insertTextAtCaret(text);
+    } finally {
+      acAccepting = false;
+    }
+    editor.setSelectionRange(start + text.length, start + text.length);
+    updateGutter();
+    updateCursor();
+  }
+
+  acPop.addEventListener("mousedown", function (e) {
+    var row = e.target && e.target.closest ? e.target.closest(".ac-item") : null;
+    if (!row) return;
+    e.preventDefault();
+    var i = parseInt(row.getAttribute("data-i"), 10);
+    if (!isNaN(i)) acIndex = i;
+    acceptCompletion();
+  });
+  acPop.addEventListener("mousemove", function (e) {
+    var row = e.target && e.target.closest ? e.target.closest(".ac-item") : null;
+    if (!row) return;
+    var i = parseInt(row.getAttribute("data-i"), 10);
+    if (!isNaN(i) && i !== acIndex) {
+      acIndex = i;
+      var rows = acPop.children;
+      for (var k = 0; k < rows.length; k++) rows[k].classList.toggle("sel", k === acIndex);
+    }
+  });
+  editor.addEventListener("input", function (e) {
+    if (acAccepting) return;
+    if (e.isComposing || composing) { hideCompletions(); return; }
+    refreshCompletions();
+  });
+  editor.addEventListener("compositionstart", hideCompletions);
+  editor.addEventListener("compositionend", function () {
+    setTimeout(function () { if (!composing) refreshCompletions(); }, 0);
+  });
+  editor.addEventListener("click", hideCompletions);
+  editor.addEventListener("blur", hideCompletions);
+  editor.addEventListener("scroll", hideCompletions);
+  document.addEventListener("mousedown", function (e) {
+    if (acOpen && e.target !== editor && !acPop.contains(e.target)) hideCompletions();
+  });
+
+  editor.addEventListener("scroll", function () {
+    gutter.scrollTop = editor.scrollTop;
+    highlightEl.scrollTop = editor.scrollTop;
+    highlightEl.scrollLeft = editor.scrollLeft;
+  });
+  editor.addEventListener("keyup", updateCursor);
+  editor.addEventListener("click", updateCursor);
+
+  // 输入法组合状态。macOS 上「回车确认候选词」时的 compositionend 可能先于
+  // keydown 触发，此时 isComposing 已为 false，需要靠时间窗口识别这次回车。
+  var composing = false;
+  var compositionEndedAt = 0;
+  editor.addEventListener("compositionstart", function () { composing = true; });
+  editor.addEventListener("compositionend", function () {
+    composing = false;
+    compositionEndedAt = Date.now();
+  });
+
+  editor.addEventListener("keydown", function (e) {
+    if (e.isComposing || e.keyCode === 229 || composing) return;
+
+    // 补全弹层打开时接管方向键、回车/Tab、Esc；输入法确认回车不算。
+    if (acOpen && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        moveCompletion(e.key === "ArrowDown" ? 1 : -1);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        hideCompletions();
+        return;
+      }
+      if ((e.key === "Enter" || (e.key === "Tab" && !e.shiftKey)) &&
+          Date.now() - compositionEndedAt >= 80) {
+        e.preventDefault();
+        acceptCompletion();
+        return;
+      }
+    }
+
+    if (e.key === "Tab") {
+      e.preventDefault();
+      var tabStart = editor.selectionStart;
+      var tabEnd = editor.selectionEnd;
+      editor.setRangeText(INDENT_UNIT, tabStart, tabEnd, "end");
+      updateGutter();
+      updateCursor();
+      return;
+    }
+
+    // 光标正对着已有的右括号时，再敲同一个右括号就跳过去。
+    if (PAIR_CLOSERS[e.key]) {
+      var cs = editor.selectionStart, ce = editor.selectionEnd;
+      if (cs === ce && editor.value.charAt(cs) === e.key) {
+        e.preventDefault();
+        editor.setSelectionRange(cs + 1, cs + 1);
+        updateCursor();
+      }
+      return;
+    }
+
+    // 光标夹在自动补出的一对括号/引号中间时，退格/删除一次删掉整对。
+    if ((e.key === "Backspace" || e.key === "Delete") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+      var bs = editor.selectionStart, be = editor.selectionEnd;
+      if (bs === be && bs > 0) {
+        var prev = editor.value.charAt(bs - 1), next = editor.value.charAt(bs);
+        var pairStart = (AUTO_PAIRS[prev] === next || (isQuoteChar(prev) && isQuoteCloser(prev, next)))
+          ? bs - 1 : -1;
+        if (pairStart >= 0) {
+          e.preventDefault();
+          var deleted = false;
+          editor.setSelectionRange(pairStart, pairStart + 2);
+          try {
+            deleted = document.execCommand("delete");
+          } catch (err) {
+            deleted = false;
+          }
+          if (!deleted) editor.setRangeText("", pairStart, pairStart + 2, "start");
+          editor.setSelectionRange(pairStart, pairStart);
+          updateGutter();
+          updateCursor();
+          return;
+        }
+      }
+    }
+
+    // 回车按作用域深度缩进；光标正对右括号时把右括号挪到下一行。
+    // 刚刚结束输入法组合时的这次回车是确认候选词，不要再换行。
+    if (e.key === "Enter" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+      if (Date.now() - compositionEndedAt < 80) {
+        e.preventDefault();
+        return;
+      }
+      e.preventDefault();
+      var start = editor.selectionStart;
+      var end = editor.selectionEnd;
+      var depth = scopeDepthAt(editor.value, start);
+      var inner = INDENT_UNIT.repeat(Math.max(0, depth));
+      var text, caret;
+      if (PAIR_CLOSERS[editor.value.charAt(end)]) {
+        text = "\n" + inner + "\n" + INDENT_UNIT.repeat(Math.max(0, depth - 1));
+        caret = start + 1 + inner.length;
+      } else {
+        text = "\n" + inner;
+        caret = start + text.length;
+      }
+      insertTextAtCaret(text);
+      editor.setSelectionRange(caret, caret);
+      updateGutter();
+      updateCursor();
+    }
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
+      runProgram();
+    } else if (e.key === "Escape" && (sessionId || busy)) {
+      e.preventDefault();
+      stopRun();
+    }
+  });
+
+  // 关闭或刷新页面时，别把正在运行的程序留在后台。
+  window.addEventListener("pagehide", function () {
+    if (!sessionId) return;
+    try {
+      var body = new Blob([JSON.stringify({ sessionId: sessionId })], { type: "application/json" });
+      navigator.sendBeacon("/api/close", body);
+    } catch (e) { /* ignore */ }
+  });
+
+  stdinBar.addEventListener("submit", async function (e) {
+    e.preventDefault();
+    if (!sessionId) return;
+    var text = stdinLine.value;
+    stdinLine.value = "";
+    activateTab("out");
+    appendOutput("> " + text + "\n");
+    try {
+      var data = await postJson("/api/input", { sessionId: sessionId, text: text + "\n" });
+      if (!data.ok) throw new Error(data.error || "发送失败");
+    } catch (err) {
+      appendOutput("[发送失败：" + errorText(err) + "]\n");
+      setStatus("发送输入失败：" + errorText(err), "err");
+    }
+    stdinLine.focus();
+  });
+
+  runBtn.addEventListener("click", runProgram);
+  stopBtn.addEventListener("click", stopRun);
+  compileBtn.addEventListener("click", compileOnly);
+  openBtn.addEventListener("click", openFile);
+  saveBtn.addEventListener("click", saveFile);
+  sampleBtn.addEventListener("click", loadSample);
+  gameBtn.addEventListener("click", loadGame);
+  clearBtn.addEventListener("click", function () {
+    editor.value = "";
+    currentName = "未命名.homo";
+    fileLabel.textContent = currentName;
+    updateGutter();
+    updateCursor();
+    editor.focus();
+    setStatus("已清空", "");
+  });
+  copyBtn.addEventListener("click", copyCpp);
+  var tabs = document.querySelectorAll(".tab");
+  for (var i = 0; i < tabs.length; i++) {
+    tabs[i].addEventListener("click", function () {
+      activateTab(this.getAttribute("data-tab"));
+    });
+  }
+
+  (async function init() {
+    try {
+      var res = await fetch("/api/starter");
+      var data = await res.json();
+      editor.value = data.source || "";
+    } catch (e) { /* 离线时留空 */ }
+    updateGutter();
+    updateCursor();
+    setStatus("就绪", "");
+  })();
+})();
+</script>
+</body>
+</html>
