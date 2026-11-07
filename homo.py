@@ -61,6 +61,8 @@ RANDOM_KW = "随机"                # 随机整数
 VARIADIC_KW = "一坨"              # 参数表里的可变参数标记
 LENGTH_KW = "长度"                # 数组/字符串长度
 INIT_KW = "首"                    # 新建对象时自动调用的方法
+PUBLIC_KW = "想看就看个够"         # 类体里切换为公开成员
+PRIVATE_KW = "摄影禁止"            # 类体里切换为私有成员
 # 字符串内置函数：名字 -> (最少参数, 最多参数)
 STRING_BUILTIN_ARITY = {
     "取子串": (2, 3), "查找": (2, 2), "包含": (2, 2), "替换": (3, 3),
@@ -303,6 +305,7 @@ class Decl(Stmt):
     line: int = 0
     # 「名字[n][m]…」按顺序列出每一维的长度；空列表表示普通变量。
     sizes: list[Expr] = field(default_factory=list)
+    private: bool = False
 
 
 @dataclass
@@ -389,6 +392,7 @@ class Func:
     params: list[Param]
     body: list[Stmt]
     line: int = 0
+    private: bool = False
 
 
 @dataclass
@@ -492,21 +496,35 @@ class Parser:
         self.expect_punc("{")
         fields: list[Decl] = []
         methods: list[Func] = []
+        private = False
         while not self.at_punc("}"):
             if self.at_end():
                 raise HomoError("类定义没有闭合（缺少 }）", self.last_line())
             if self.at_punc(";"):
                 self.consume()
                 continue
+            if self.at_id(PUBLIC_KW):
+                self.consume()
+                private = False
+                continue
+            if self.at_id(PRIVATE_KW):
+                self.consume()
+                private = True
+                continue
             if self.at_id(DECL):
-                fields.append(self.parse_decl())
+                fld = self.parse_decl()
+                fld.private = private
+                fields.append(fld)
                 continue
             t = self.peek()
             nxt = self.peek(1)
             if t is not None and t.kind == "id" and nxt is not None and nxt.kind == "punc" and nxt.text == "(":
-                methods.append(self.parse_function())
+                method = self.parse_function()
+                method.private = private
+                methods.append(method)
                 continue
-            raise HomoError("类体里只能写字段声明（你是一个一个一个）或方法", t.line if t else self.last_line())
+            raise HomoError("类体里只能写访问标记、字段声明（你是一个一个一个）或方法",
+                            t.line if t else self.last_line())
         self.expect_punc("}")
         if not methods:
             raise HomoError(f"类「{name.text}」至少要有一个方法", name.line)
@@ -576,6 +594,8 @@ class Parser:
         if t is None:
             raise HomoError("意外的文件结尾", self.last_line())
         if t.kind == "id":
+            if t.text in (PUBLIC_KW, PRIVATE_KW):
+                raise HomoError(f"「{t.text}」只能写在类体里", t.line)
             if t.text == DECL:
                 return self.parse_decl()
             if t.text == IF_HEAD:
@@ -1127,7 +1147,7 @@ RESERVED_VAR_NAMES = {
     WHILE_HEAD, TRUE_KW, FALSE_KW, NULL_KW, NOT_KW, LT_KW, AND_KW, EQ_KW, OR_KW,
     MOD_KW, CONTINUE_KW, SWITCH_HEAD, CASE_KW, DEFAULT_KW, DO_HEAD, DO_TAIL,
     REPEAT_MID, REPEAT_TAIL, REPEAT_VAR, BREAK_KW, RETURN_KW, CLASS_KW, NEW_KW,
-    VARIADIC_KW, "import",
+    VARIADIC_KW, PUBLIC_KW, PRIVATE_KW, "import",
 } | set(COMPOUND_OPS)
 
 
@@ -1504,6 +1524,12 @@ class CEmitter:
         self.add("homo_any call(const std::string& _name, std::vector<homo_any> _args, "
                  "long long _homo_line) override {", c.line)
         self.indent += 1
+        # 私有方法只能在本类方法里用裸名字调用；「新建」对「首」的调用不受限制。
+        for m in c.methods:
+            if m.private and m.name != INIT_KW:
+                msg = f"「{c.name}.{m.name}」是私有方法，不能在类外调用"
+                self.add(f"if (_name == {cpp_quote(m.name)}) homo_runtime_error("
+                         f"_homo_line, {cpp_quote(msg)});", m.line)
         for m in c.methods:
             required, maximum = param_arity(m.params)
             cond = f"_name == {cpp_quote(m.name)}"
@@ -1550,6 +1576,12 @@ class CEmitter:
         self.add("homo_any& get_field(const std::string& _name, "
                  "long long _homo_line) override {", c.line)
         self.indent += 1
+        # 私有字段只能在本类方法里用裸名字读写；「对象.字段」一律拒绝。
+        for fld in c.fields:
+            if fld.private:
+                msg = f"「{c.name}.{fld.name}」是私有字段，不能在类外访问"
+                self.add(f"if (_name == {cpp_quote(fld.name)}) homo_runtime_error("
+                         f"_homo_line, {cpp_quote(msg)});", fld.line)
         for fld in c.fields:
             self.add(f"if (_name == {cpp_quote(fld.name)}) return {cxx_name(fld.name)};", fld.line)
         self.add('homo_runtime_error(_homo_line, "对象没有字段「" + _name + "」");', c.line)
@@ -1558,6 +1590,11 @@ class CEmitter:
         self.add("void set_field(const std::string& _name, homo_any _v, "
                  "long long _homo_line) override {", c.line)
         self.indent += 1
+        for fld in c.fields:
+            if fld.private:
+                msg = f"「{c.name}.{fld.name}」是私有字段，不能在类外访问"
+                self.add(f"if (_name == {cpp_quote(fld.name)}) homo_runtime_error("
+                         f"_homo_line, {cpp_quote(msg)});", fld.line)
         for fld in c.fields:
             self.add(
                 f"if (_name == {cpp_quote(fld.name)}) {{ {cxx_name(fld.name)} = std::move(_v); return; }}",
