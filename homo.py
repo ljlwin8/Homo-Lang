@@ -36,6 +36,7 @@ ELSE = "戳啦极霸矛嘛"             # else
 
 WHILE_HEAD = "动起来啊动起来"      # while
 TRUE_KW = "确信"                  # 真
+FALSE_KW = "大嘘"                 # 假
 NULL_KW = "虚无"                  # 空值
 NOT_KW = "迫真"                   # 逻辑非
 LT_KW = "甚至"                    # <
@@ -193,6 +194,7 @@ class Ident(Expr):
 
 @dataclass
 class BoolLit(Expr):
+    value: bool = True
     line: int = 0
 
 
@@ -880,7 +882,10 @@ class Parser:
                 return LoopVar(t.line)
             if t.text == TRUE_KW:
                 self.consume()
-                return BoolLit(t.line)
+                return BoolLit(True, t.line)
+            if t.text == FALSE_KW:
+                self.consume()
+                return BoolLit(False, t.line)
             if t.text == NULL_KW:
                 self.consume()
                 return NullLit(t.line)
@@ -1013,7 +1018,7 @@ def analyze_types(program: Program) -> list[dict]:
         if isinstance(e, Str):
             return "string"
         if isinstance(e, BoolLit):
-            return "int"
+            return "bool"
         if isinstance(e, NullLit):
             return "null"
         if isinstance(e, New):
@@ -1885,7 +1890,7 @@ class CEmitter:
         if isinstance(e, Str):
             return f"homo_value({cpp_quote(string_inner(e.raw))})"
         if isinstance(e, BoolLit):
-            return "homo_value(true)"
+            return "homo_value(true)" if e.value else "homo_value(false)"
         if isinstance(e, NullLit):
             return "homo_null()"
         if isinstance(e, Ident):

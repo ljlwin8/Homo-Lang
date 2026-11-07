@@ -188,12 +188,12 @@
   }
   #editor::selection { background: rgba(181, 166, 58, .22); }
 
-  /* 语法高亮配色：函数/关键字/数组符号紫、变量白、立即数 rgb(182,201,168)、
-     类名青绿、声明前置洋红、文本淡蓝、函数参数橙、注释灰。 */
+  /* 语法高亮配色：函数/关键字/数组符号紫、变量与迫真白、立即数 rgb(182,201,168)、
+     类名青绿、声明前置洋红、文本淡蓝、函数参数橙、布尔与空值深蓝、注释灰。 */
   .tok-decl  { color: rgb(239, 131, 119); }
   .tok-kw    { color: #c678dd; }
-  .tok-op    { color: #c678dd; }
-  .tok-lit   { color: #c678dd; }
+  .tok-op    { color: #ffffff; }
+  .tok-bool  { color: #2e4fd0; }
   .tok-fn    { color: #c678dd; }
   .tok-cls   { color: #4ec9b0; }
   .tok-param { color: #d19a66; }
@@ -508,7 +508,8 @@
     "且": "sep",
     "甚至": "sep",
     "就事": "sep",
-    "确信": "lit",
+    "确信": "bool",
+    "大嘘": "bool",
     "虚无": "null",
     "脱出": "fn",
     "读入": "fn",
@@ -1347,7 +1348,7 @@
   // 候选：homo 关键字/内置函数 + 文档里出现过的名字（变量、函数、类、方法）。
   var AC_KIND_LABELS = {
     decl: "声明", sep: "语法", kw: "关键字", op: "运算符",
-    lit: "字面量", fn: "内置", cls: "类名", loopvar: "循环变量",
+    bool: "布尔", fn: "内置", cls: "类名", loopvar: "循环变量",
     null: "空值"
   };
   var AC_KEYWORDS = Object.keys(HL_WORDS).map(function (w) {
