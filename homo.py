@@ -43,7 +43,7 @@ LT_KW = "甚至"                    # <
 AND_KW = "且"                     # 逻辑与
 EQ_KW = "就事"                    # ==
 OR_KW = "或"                      # 逻辑或
-MOD_KW = "撅"                     # 取模
+MOD_KW = "化粪"                   # 取模
 CONTINUE_KW = "速达哟"              # continue
 SWITCH_HEAD = "人类有三大欲望"     # switch
 CASE_KW = "食欲"                  # case
