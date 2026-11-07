@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>homo 编译器</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3CclipPath id='r'%3E%3Crect width='64' height='64' rx='14'/%3E%3C/clipPath%3E%3C/defs%3E%3Cg clip-path='url(%23r)'%3E%3Crect width='32' height='64' fill='%237f8c89'/%3E%3Crect x='32' width='32' height='64' fill='%23c9c6b9'/%3E%3Ccircle cx='32' cy='78' r='36' fill='%23201e27'/%3E%3Ccircle cx='32' cy='29' r='13' fill='%23a55a3f'/%3E%3C/g%3E%3C/svg%3E">
 <style>
   :root {
     --bg: #0c0f14;
@@ -12,9 +13,9 @@
     --border: #222a36;
     --text: #e7edf5;
     --muted: #8a97a8;
-    --accent: #5eead4;
+    --accent: #b5a63a;
     --accent-2: #fbbf24;
-    --ok: #34d399;
+    --ok: #b5a63a;
     --err: #f87171;
     --mono: "SF Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
@@ -47,13 +48,8 @@
   .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
   .logo {
     width: 38px; height: 38px;
-    border-radius: 10px;
-    display: grid; place-items: center;
-    background: linear-gradient(145deg, #123e39, #0d2724);
-    border: 1px solid #1e514a;
-    color: var(--accent);
-    font-family: var(--mono);
-    font-weight: 700; font-size: 17px;
+    flex: 0 0 38px;
+    display: block;
   }
   .titles h1 { margin: 0; font-size: 15px; letter-spacing: .2px; }
   .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
@@ -74,7 +70,7 @@
   button:disabled { opacity: .55; cursor: default; }
   button.primary {
     background: var(--accent);
-    color: #07221e;
+    color: #241d05;
     border-color: transparent;
     font-weight: 650;
   }
@@ -162,7 +158,7 @@
     cursor: pointer;
     white-space: nowrap;
   }
-  #ac-pop .ac-item.sel { background: rgba(94, 234, 212, .16); }
+  #ac-pop .ac-item.sel { background: rgba(181, 166, 58, .16); }
   #ac-pop .ac-name { overflow: hidden; text-overflow: ellipsis; }
   #ac-pop .ac-kind { color: #5f6c7e; font-size: 10.5px; flex: none; }
   #editor, #highlight {
@@ -190,7 +186,7 @@
     color: transparent;
     caret-color: var(--accent);
   }
-  #editor::selection { background: rgba(94, 234, 212, .22); }
+  #editor::selection { background: rgba(181, 166, 58, .22); }
 
   /* 语法高亮配色：函数/关键字/数组符号紫、变量白、立即数 rgb(182,201,168)、
      类名青绿、声明前置洋红、文本淡蓝、函数参数橙、注释灰。 */
@@ -265,7 +261,7 @@
     font: 12.5px var(--mono);
     outline: none;
   }
-  #stdin-line:focus { border-color: #2f6f66; box-shadow: 0 0 0 2px rgba(94, 234, 212, .10); }
+  #stdin-line:focus { border-color: #6b6230; box-shadow: 0 0 0 2px rgba(181, 166, 58, .12); }
   #stdin-line::placeholder { color: #5f6c7e; }
   .stdin-bar button { padding: 6px 12px; }
 
@@ -303,7 +299,15 @@
 <body>
   <header>
     <div class="brand">
-      <div class="logo">h</div>
+      <svg class="logo" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <defs><clipPath id="logo-clip"><rect width="64" height="64" rx="14"/></clipPath></defs>
+        <g clip-path="url(#logo-clip)">
+          <rect width="32" height="64" fill="#7f8c89"/>
+          <rect x="32" width="32" height="64" fill="#c9c6b9"/>
+          <circle cx="32" cy="78" r="36" fill="#201e27"/>
+          <circle cx="32" cy="29" r="13" fill="#a55a3f"/>
+        </g>
+      </svg>
       <div class="titles">
         <h1>homo 编译器</h1>
       </div>
