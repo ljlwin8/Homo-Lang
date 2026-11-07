@@ -183,7 +183,7 @@ inline homo_any homo_call(const homo_any& o, const std::string& name,
     return o.obj->call(name, std::move(args), line);
 }
 
-// 新建对象后自动执行「初始化」；返回同一个对象，便于继续用后缀。
+// 新建对象后自动执行「首」；返回同一个对象，便于继续用后缀。
 inline homo_any homo_init_object(homo_any o, const std::string& name,
                                  std::vector<homo_any> args, long long line) {
     homo_call(o, name, std::move(args), line);
