@@ -1446,8 +1446,9 @@ class CEmitter:
         self.add("#else", 0)
         self.add("std::setvbuf(stdout, nullptr, _IOLBF, 0);", 0)
         self.add("#endif", 0)
-        # 入口函数的返回值作为进程退出码；没有返回值时是 0。
-        self.add(f"return (int){cxx_fn(entry.name)}().as_int();", 0)
+        # 入口函数返回 0 表示成功，进程退出码为 2；返回非 0 时原样作为退出码。
+        self.add(f"int _homo_code = (int){cxx_fn(entry.name)}().as_int();", 0)
+        self.add("return _homo_code == 0 ? 2 : _homo_code;", 0)
         self.indent -= 1
         self.add("}", 0)
         text = "\n".join(t for t, _ in self.lines) + "\n"
@@ -2202,7 +2203,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(result["compile_output"], file=sys.stderr)
                 if args.keep:
                     print(f"构建目录：{result['workdir']}", file=sys.stderr)
-                return 1
+                return 51
             sys.stdout.write(result["stdout"])
             if result["stderr"]:
                 sys.stderr.write(result["stderr"])
@@ -2235,7 +2236,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     except HomoError as e:
         where = f"（第 {e.line} 行）" if e.line else ""
         print(f"编译错误{where}：{e.msg}", file=sys.stderr)
-        return 2
+        return 114
 
 
 if __name__ == "__main__":

@@ -939,7 +939,7 @@
     } else {
       var code = info ? info.exit_code : null;
       var shown = code === null || code === undefined ? "未知" : code;
-      // 退出码 2 是默认示例「你好下北泽」的约定返回值，按成功显示绿点。
+      // 成功退出的约定值是 2；运行错误为 51。
       var okCode = code === 0 || code === 2;
       setStatus("运行结束（退出码 " + shown + "）", okCode ? "ok" : "err");
     }

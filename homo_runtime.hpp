@@ -98,7 +98,7 @@ inline homo_value homo_null_value() {
 // 运行期错误统一从这里退出，错误信息带 homo 源码行号。
 [[noreturn]] inline void homo_runtime_error(long long line, const std::string& msg) {
     std::fprintf(stderr, "运行错误（第 %lld 行）：%s\n", line, msg.c_str());
-    std::exit(1);
+    std::exit(51);
 }
 
 // homo 的语言层面不分类型：变量、参数、返回值都可能装标量、数组或对象。
