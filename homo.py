@@ -622,8 +622,6 @@ class Parser:
                 self.consume()
                 return Continue(t.line)
             nxt = self.peek(1)
-            if nxt is not None and nxt.kind == "id" and nxt.text == "=":
-                raise HomoError("homo 的赋值要写成「事 … 罢」，「=」不是赋值符号", t.line)
             if nxt is not None and nxt.text in ASSIGN_OPS:
                 return self.parse_assign()
             if nxt is not None and nxt.kind == "punc" and nxt.text in ("[", "."):
@@ -699,8 +697,6 @@ class Parser:
             return CallStmt(target, target.line)
         tok = self.peek()
         if tok is None or tok.text not in ASSIGN_OPS:
-            if tok is not None and tok.text == "=":
-                raise HomoError("homo 的赋值要写成「事 … 罢」，「=」不是赋值符号", target.line)
             got = "结尾" if tok is None else f"「{tok.text}」"
             raise HomoError(f"赋值语句需要一个赋值算子，但读到了{got}", target.line)
         self.consume()
@@ -822,10 +818,6 @@ class Parser:
             if self.at_id(LT_KW):
                 t = self.consume()
                 left = Lt(left, self.parse_add(), t.line)
-            elif self.at_id("就事") or self.at_id("与") or self.at_id("完全一致"):
-                raise HomoError("等值比较要写成「(a)先辈(b)说」", self.peek(0).line)
-            elif self.at_id("和"):
-                raise HomoError("逻辑与要写成「x 且 y」", self.peek(0).line)
             else:
                 break
         return left
