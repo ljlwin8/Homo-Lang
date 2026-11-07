@@ -1426,8 +1426,8 @@ class CEmitter:
         self.add("#else", 0)
         self.add("std::setvbuf(stdout, nullptr, _IOLBF, 0);", 0)
         self.add("#endif", 0)
-        self.add(f"(void){cxx_fn(entry.name)}();", 0)
-        self.add("return 0;", 0)
+        # 入口函数的返回值作为进程退出码；没有返回值时是 0。
+        self.add(f"return (int){cxx_fn(entry.name)}().as_int();", 0)
         self.indent -= 1
         self.add("}", 0)
         text = "\n".join(t for t, _ in self.lines) + "\n"

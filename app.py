@@ -35,7 +35,7 @@ STARTER_SOURCE = """import homocore
 
 会员制餐厅(){
     脱出("你好下北泽")噗叽啪
-    (0)人幸终
+    (2)人幸终
 }
 """
 
