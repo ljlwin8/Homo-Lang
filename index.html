@@ -767,6 +767,8 @@
         while (q < n && /\s/.test(src[q])) q += 1;
         var hasCall = q < n && isOpenParen(src[q]);
         var kind = HL_WORDS[word];
+        // 内置函数名只有后面跟括号时才按函数着色；`脱出 事 …` 这种同名变量仍是白色。
+        if (kind === "fn" && !hasCall) kind = null;
         var wantClass = expectClass;
         expectClass = false;
         if (!kind) {

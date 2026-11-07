@@ -528,11 +528,13 @@ class Parser:
                 if is_variadic:
                     marker = self.consume()
                     name = self.expect_id()
+                    check_variable_name(name.text, name.line)
                     params.append(Param(name.text, None, True, marker.line))
                     if self.at_punc(","):
                         raise HomoError("可变参数只能用一次，而且要写在参数列表最后", marker.line)
                     break
                 name = self.expect_id()
+                check_variable_name(name.text, name.line)
                 default = None
                 if self.at_id(ASSIGN):
                     self.consume()
@@ -634,6 +636,7 @@ class Parser:
         name = self.expect_id()
         if name.text == REPEAT_VAR:
             raise HomoError(f"「{REPEAT_VAR}」是循环里的迭代变量，不能用作变量名", name.line)
+        check_variable_name(name.text, name.line)
         sizes: list[Expr] = []
         while self.at_punc("["):
             self.consume()
@@ -682,6 +685,8 @@ class Parser:
         elif isinstance(target, Index) and isinstance(target.obj, Ident):
             name = target.obj.name
             index = target.index
+        if name:
+            check_variable_name(name, target.line)
         return Assign(name, op, expr, target.line, index, target)
 
     def parse_if(self) -> If:
@@ -1112,6 +1117,23 @@ def analyze_types(program: Program) -> list[dict]:
 # 静态名字检查（供编辑器实时提示，也避免把未定义名字拖到 C++ 编译阶段）
 # --------------------------------------------------------------------------
 BUILTIN_CALLS = {"脱出", "读入", "读行", RANDOM_KW, LENGTH_KW} | set(STRING_BUILTIN_ARITY)
+
+# 语法关键字在解析表达式/语句时有固定含义，再拿来当变量名会让同一行代码
+# 出现两种解释（比如「类 事 …」看起来像类定义）。变量、参数、字段都查。
+# 内置函数名（长度、随机、脱出等）不在其列：它们可以像普通名字一样被遮蔽。
+RESERVED_VAR_NAMES = {
+    DECL, DECL_END, ASSIGN, STMT_END, CALL_END,
+    IF_HEAD, IF_MID, ELSEIF_HEAD, ELSEIF_TAIL, ELSE, "极霸矛",
+    WHILE_HEAD, TRUE_KW, FALSE_KW, NULL_KW, NOT_KW, LT_KW, AND_KW, EQ_KW, OR_KW,
+    MOD_KW, CONTINUE_KW, SWITCH_HEAD, CASE_KW, DEFAULT_KW, DO_HEAD, DO_TAIL,
+    REPEAT_MID, REPEAT_TAIL, REPEAT_VAR, BREAK_KW, RETURN_KW, CLASS_KW, NEW_KW,
+    VARIADIC_KW, "import",
+} | set(COMPOUND_OPS)
+
+
+def check_variable_name(name: str, line: int) -> None:
+    if name in RESERVED_VAR_NAMES:
+        raise HomoError(f"「{name}」是关键字，不能用作变量名", line)
 
 
 def param_arity(params: list[Param]) -> tuple[int, Optional[int]]:
