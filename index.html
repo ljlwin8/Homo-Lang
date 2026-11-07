@@ -316,11 +316,8 @@
     <div class="actions">
       <button id="btn-run" class="primary">运行<kbd>⌘↵</kbd></button>
       <button id="btn-stop" class="danger" hidden>终止运行</button>
-      <button id="btn-compile">仅编译</button>
-      <button id="btn-open">打开并编译</button>
-      <button id="btn-save">保存 .homo</button>
-      <button id="btn-sample">示例</button>
-      <button id="btn-game">玩扫雷</button>
+      <button id="btn-open">打开......</button>
+      <button id="btn-save">保存......</button>
       <button id="btn-clear">清空</button>
       <input type="file" id="file-input" accept=".homo,text/plain" hidden>
     </div>
@@ -342,13 +339,13 @@
 
     <section class="pane">
       <div class="tabs" role="tablist" aria-label="输出面板">
-        <button class="tab active" data-tab="cpp" role="tab">生成的 C++</button>
-        <button class="tab" data-tab="out" role="tab">运行结果</button>
+        <button class="tab active" data-tab="out" role="tab">运行结果</button>
+        <button class="tab" data-tab="cpp" role="tab">生成的 C++</button>
         <button id="btn-copy" class="ghost" title="复制生成的 C++">复制 C++</button>
       </div>
       <div class="panels">
-        <pre id="panel-cpp" class="panel">点击「运行」后，这里会显示翻译出的 C++ 代码。</pre>
-        <pre id="panel-out" class="panel" hidden>点击「运行」查看程序输出。</pre>
+        <pre id="panel-out" class="panel">点击「运行」查看程序输出。</pre>
+        <pre id="panel-cpp" class="panel" hidden>点击「运行」后，这里会显示翻译出的 C++ 代码。</pre>
       </div>
       <form id="stdin-bar" class="stdin-bar" hidden>
         <span class="prompt">›</span>
@@ -380,11 +377,8 @@
   var cursorEl = document.getElementById("cursor");
   var runBtn = document.getElementById("btn-run");
   var stopBtn = document.getElementById("btn-stop");
-  var compileBtn = document.getElementById("btn-compile");
   var openBtn = document.getElementById("btn-open");
   var saveBtn = document.getElementById("btn-save");
-  var sampleBtn = document.getElementById("btn-sample");
-  var gameBtn = document.getElementById("btn-game");
   var clearBtn = document.getElementById("btn-clear");
   var copyBtn = document.getElementById("btn-copy");
   var fileInput = document.getElementById("file-input");
@@ -397,6 +391,7 @@
   var outputOffset = 0;
   var stopRequested = false;
   var currentName = "hello.homo";
+  var STARTER_FALLBACK = "import homocore\n\n会员制餐厅(){\n    脱出(\"你好下北泽\")噗叽啪\n    (0)人幸终\n}\n";
   var lintBar = document.getElementById("lint-bar");
   var lintLine = 0;
   var lintTimer = null;
@@ -882,11 +877,8 @@
     busy = value;
     document.body.classList.toggle("busy", value);
     runBtn.disabled = value;
-    compileBtn.disabled = value;
     openBtn.disabled = value;
     saveBtn.disabled = value;
-    sampleBtn.disabled = value;
-    gameBtn.disabled = value;
     clearBtn.disabled = value;
     stopBtn.hidden = !stoppable;
     stopBtn.disabled = !stoppable;
@@ -1021,58 +1013,6 @@
     }
   }
 
-  async function compileOnly() {
-    if (busy) return;
-    setBusy(true);
-    setStatus("编译中…", "busy");
-    try {
-      var data = await post("/api/compile");
-      if (data.phase === "parse") { showParseError(data); return; }
-      if (!data.ok) { showCompileError(data); return; }
-      setPanelText("cpp", data.cpp || "");
-      setPanelText("out", "编译成功，未运行。" + (data.compile_output ? "\n\n[编译器提示]\n" + data.compile_output : ""));
-      clearLintMessage();
-      activateTab("cpp");
-      setStatus("编译成功", "ok");
-    } catch (err) {
-      setStatus("请求失败：" + errorText(err), "err");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function loadSample() {
-    try {
-      var res = await fetch("/api/sample");
-      var data = await res.json();
-      editor.value = data.source || "";
-      currentName = "test.homo";
-      fileLabel.textContent = currentName;
-      updateGutter();
-      updateCursor();
-      setStatus("已载入 test.homo", "ok");
-    } catch (err) {
-      setStatus("载入示例失败：" + errorText(err), "err");
-    }
-  }
-
-  async function loadGame() {
-    if (busy) return;
-    try {
-      var res = await fetch("/api/sample?name=minesweeper.homo");
-      var data = await res.json();
-      if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
-      editor.value = data.source || "";
-      currentName = "minesweeper.homo";
-      fileLabel.textContent = currentName;
-      updateGutter();
-      updateCursor();
-      await runProgram();
-    } catch (err) {
-      setStatus("载入扫雷失败：" + errorText(err), "err");
-    }
-  }
-
   function downloadFile(name, text) {
     var blob = new Blob([text], { type: "text/plain;charset=utf-8" });
     var url = URL.createObjectURL(blob);
@@ -1133,8 +1073,7 @@
       fileLabel.textContent = currentName;
       updateGutter();
       updateCursor();
-      setStatus("正在编译 " + currentName + "…", "busy");
-      await compileOnly();
+      setStatus("已打开 " + currentName, "ok");
     } catch (err) {
       setStatus("打开文件失败：" + errorText(err), "err");
     }
@@ -1790,19 +1729,23 @@
 
   runBtn.addEventListener("click", runProgram);
   stopBtn.addEventListener("click", stopRun);
-  compileBtn.addEventListener("click", compileOnly);
   openBtn.addEventListener("click", openFile);
   saveBtn.addEventListener("click", saveFile);
-  sampleBtn.addEventListener("click", loadSample);
-  gameBtn.addEventListener("click", loadGame);
-  clearBtn.addEventListener("click", function () {
-    editor.value = "";
-    currentName = "未命名.homo";
+  clearBtn.addEventListener("click", async function () {
+    if (busy) return;
+    var source = STARTER_FALLBACK;
+    try {
+      var res = await fetch("/api/starter");
+      var data = await res.json();
+      if (res.ok && data.source) source = data.source;
+    } catch (e) { /* 服务不可用时用本地副本 */ }
+    editor.value = source;
+    currentName = "hello.homo";
     fileLabel.textContent = currentName;
     updateGutter();
     updateCursor();
     editor.focus();
-    setStatus("已清空", "");
+    setStatus("已载入 你好下北泽", "ok");
   });
   copyBtn.addEventListener("click", copyCpp);
   var tabs = document.querySelectorAll(".tab");
@@ -1817,7 +1760,7 @@
       var res = await fetch("/api/starter");
       var data = await res.json();
       editor.value = data.source || "";
-    } catch (e) { /* 离线时留空 */ }
+    } catch (e) { editor.value = STARTER_FALLBACK; }
     updateGutter();
     updateCursor();
     setStatus("就绪", "");
