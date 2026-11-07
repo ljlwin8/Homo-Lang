@@ -407,6 +407,7 @@ class Class:
 class Program:
     functions: list[Func]
     classes: list[Class] = field(default_factory=list)
+    globals: list[Decl] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -467,6 +468,7 @@ class Parser:
     def parse_program(self) -> Program:
         funcs: list[Func] = []
         classes: list[Class] = []
+        globals_: list[Decl] = []
         while not self.at_end():
             if self.at_id("import"):
                 self.consume()
@@ -480,15 +482,21 @@ class Parser:
             if self.at_id(CLASS_KW):
                 classes.append(self.parse_class())
                 continue
+            if self.at_id(DECL):
+                globals_.append(self.parse_decl())
+                continue
             t = self.peek()
             nxt = self.peek(1)
             if t is not None and t.kind == "id" and nxt is not None and nxt.kind == "punc" and nxt.text == "(":
                 funcs.append(self.parse_function())
             else:
-                raise HomoError("顶层只能写 import、类定义或函数定义（函数名后要跟括号）", t.line if t else 1)
+                raise HomoError(
+                    "顶层只能写 import、全局变量声明、类定义或函数定义（函数名后要跟括号）",
+                    t.line if t else 1,
+                )
         if not funcs:
             raise HomoError("程序里至少要有一个函数（入口请命名为「会员制餐厅」）", 1)
-        return Program(funcs, classes)
+        return Program(funcs, classes, globals_)
 
     def parse_class(self) -> Class:
         head = self.expect_id(CLASS_KW)
@@ -1110,6 +1118,7 @@ def analyze_types(program: Program) -> list[dict]:
                 for _, body in s.cases:
                     walk(body)
 
+    walk(program.globals)
     for f in program.functions:
         walk(f.body)
     for c in program.classes:
@@ -1214,6 +1223,7 @@ def check_names(program: Program) -> None:
     functions_by_name = {f.name: f for f in program.functions}
     class_names = {c.name for c in program.classes}
     classes_by_name = {c.name: c for c in program.classes}
+    all_global_names = {g.name for g in program.globals}
     for f in program.functions:
         if f.name in BUILTIN_CALLS:
             raise HomoError(f"「{f.name}」是内置函数名，不能用作函数名", f.line)
@@ -1225,6 +1235,11 @@ def check_names(program: Program) -> None:
             return
         if isinstance(e, Ident):
             if e.name not in declared:
+                if e.name in all_global_names:
+                    raise HomoError(
+                        f"全局变量「{e.name}」还没声明；全局初始值只能引用前面已声明的全局",
+                        e.line,
+                    )
                 raise HomoError(f"未定义的变量「{e.name}」", e.line)
         elif isinstance(e, Call):
             if e.name not in calls:
@@ -1367,25 +1382,37 @@ def check_names(program: Program) -> None:
                 check_expr(s.expr, scopes, calls)
 
     global_calls = function_names | BUILTIN_CALLS
+    global_names: set[str] = set()
+    for g in program.globals:
+        if g.name in global_names:
+            raise HomoError(f"全局变量「{g.name}」重复声明", g.line)
+        if g.name in function_names:
+            raise HomoError(f"全局变量「{g.name}」不能和函数重名", g.line)
+        if g.name in class_names:
+            raise HomoError(f"全局变量「{g.name}」不能和类重名", g.line)
+        for size in g.sizes:
+            check_expr(size, Scopes(global_names), global_calls)
+        check_expr(g.init, Scopes(global_names), global_calls)
+        global_names.add(g.name)
     for f in program.functions:
         for p in f.params:
             if p.default is not None:
-                # 默认值在调用点求值，检查时不能看到参数和调用方局部变量。
-                check_expr(p.default, Scopes(), global_calls)
-        check_stmts(f.body, Scopes({p.name for p in f.params}), global_calls)
+                # 默认值在调用点求值，检查时能看到全局变量，不能看到参数和调用方局部变量。
+                check_expr(p.default, Scopes(global_names), global_calls)
+        check_stmts(f.body, Scopes(global_names, {p.name for p in f.params}), global_calls)
     for c in program.classes:
         field_names = {fld.name for fld in c.fields}
         for fld in c.fields:
             for size in fld.sizes:
-                check_expr(size, Scopes(field_names), global_calls)
-            check_expr(fld.init, Scopes(field_names), global_calls)
+                check_expr(size, Scopes(global_names, field_names), global_calls)
+            check_expr(fld.init, Scopes(global_names, field_names), global_calls)
         method_calls = global_calls | {m.name for m in c.methods}
         for m in c.methods:
             for p in m.params:
                 if p.default is not None:
-                    check_expr(p.default, Scopes(), global_calls)
-            check_stmts(m.body, Scopes(field_names, {p.name for p in m.params}),
-                        method_calls)
+                    check_expr(p.default, Scopes(global_names), global_calls)
+            check_stmts(m.body, Scopes(global_names, field_names,
+                                       {p.name for p in m.params}), method_calls)
 
 
 # --------------------------------------------------------------------------
@@ -1403,6 +1430,11 @@ class CEmitter:
         self.break_targets: list[Optional[str]] = []
         self.functions = {f.name: f for f in program.functions}
         self.classes = {c.name: c for c in program.classes}
+        # 全局变量在所有函数、方法和字段初值里都可见，作为最外层作用域。
+        self.globals_frame = {
+            g.name: ("array" if g.sizes or isinstance(g.init, ArrayLit) else "scalar")
+            for g in program.globals
+        }
 
     def param_frame(self, params: list[Param]) -> dict[str, str]:
         return {p.name: ("array" if p.variadic else "unknown") for p in params}
@@ -1450,6 +1482,13 @@ class CEmitter:
                 params = ", ".join(f"homo_any {cxx_name(p.name)}" for p in f.params)
                 self.add(f"homo_any {cxx_fn(f.name)}({params});", f.line)
             self.blank()
+        # 全局变量先只声明，初值统一放到 main 里按源码顺序赋值，
+        # 这样带「新建」的初值能用到完整的类定义，初始化顺序也确定。
+        for g in self.program.globals:
+            self.add(f"homo_any {cxx_name(g.name)};", g.line)
+        if self.program.globals:
+            self.blank()
+        self.scopes = [dict(self.globals_frame)]
         for c in self.program.classes:
             self.emit_class(c)
             self.blank()
@@ -1466,6 +1505,10 @@ class CEmitter:
         self.add("#else", 0)
         self.add("std::setvbuf(stdout, nullptr, _IOLBF, 0);", 0)
         self.add("#endif", 0)
+        # 全局变量按源码顺序初始化；只有前面声明过的全局能出现在初值里。
+        self.scopes = [dict(self.globals_frame)]
+        for g in self.program.globals:
+            self.emit_global_init(g)
         # 入口函数返回 0 表示成功，进程退出码为 2；返回非 0 时原样作为退出码。
         self.add(f"int _homo_code = (int){cxx_fn(entry.name)}().as_int();", 0)
         self.add("return _homo_code == 0 ? 2 : _homo_code;", 0)
@@ -1483,12 +1526,24 @@ class CEmitter:
             raise HomoError("入口函数不能带参数", f.line)
         return f
 
+    def emit_global_init(self, g: Decl) -> None:
+        cname = cxx_name(g.name)
+        if g.sizes:
+            if g.init is not None and not isinstance(g.init, ArrayLit):
+                raise HomoError(f"数组全局变量「{g.name}」的初值必须是 [ … ] 字面量", g.line)
+            self.add(f"{cname} = {self.array_value(g.init, g.sizes)};", g.line)
+        elif g.init is not None:
+            if isinstance(g.init, ArrayLit):
+                self.add(f"{cname} = {self.array_literal(g.init)};", g.line)
+            else:
+                self.add(f"{cname} = {self.expr(g.init)};", g.line)
+
     def emit_function(self, f: Func) -> None:
         params = ", ".join(f"homo_any {cxx_name(p.name)}" for p in f.params)
         self.add(f"homo_any {cxx_fn(f.name)}({params}) {{", f.line)
         self.indent += 1
         # 参数在编译期不知道装的是标量还是数组，两种形式都放行。
-        self.scopes = [self.param_frame(f.params)]
+        self.scopes = [dict(self.globals_frame), self.param_frame(f.params)]
         self.repeat_stack = []
         self.break_targets = []
         for s in f.body:
@@ -1659,7 +1714,7 @@ class CEmitter:
             fld.name: ("array" if fld.sizes or isinstance(fld.init, ArrayLit) else "scalar")
             for fld in cls.fields
         }
-        self.scopes = [fields, self.param_frame(m.params)]
+        self.scopes = [dict(self.globals_frame), fields, self.param_frame(m.params)]
         self.repeat_stack = []
         self.break_targets = []
         for s in m.body:
