@@ -916,7 +916,7 @@ class Parser:
 
 
 # --------------------------------------------------------------------------
-# 类型推导（供展示与代码注释使用）
+# 类型推导（结果随 transpile/build 返回给调用方）
 # --------------------------------------------------------------------------
 def string_inner(raw: str) -> str:
     """去掉字符串字面量两端的引号（引号可以是半角或全角，且两端不必同种）。"""
@@ -1345,9 +1345,8 @@ def check_names(program: Program) -> None:
 # C++ 代码生成
 # --------------------------------------------------------------------------
 class CEmitter:
-    def __init__(self, program: Program, types: list[dict]):
+    def __init__(self, program: Program):
         self.program = program
-        self.types = types
         self.lines: list[tuple[str, int]] = []   # (代码行, homo 源码行)
         self.indent = 0
         self.loop_counter = 0
@@ -1399,15 +1398,9 @@ class CEmitter:
     def emit(self) -> tuple[str, list[int]]:
         self.add('#include "homo_runtime.hpp"', 0)
         self.blank()
-        if self.types:
-            self.add("// 自动推导的变量类型：", 0)
-            for t in self.types:
-                desc = " → ".join(t["kinds"]) if t["kinds"] else "未知"
-                self.add(f"//   {t['name']}: {desc}", 0)
-            self.blank()
         if self.program.functions:
             for f in self.program.functions:
-                params = ", ".join(f"homo_any {p.name}" for p in f.params)
+                params = ", ".join(f"homo_any {cxx_name(p.name)}" for p in f.params)
                 self.add(f"homo_any {cxx_fn(f.name)}({params});", f.line)
             self.blank()
         for c in self.program.classes:
@@ -1443,7 +1436,7 @@ class CEmitter:
         return f
 
     def emit_function(self, f: Func) -> None:
-        params = ", ".join(f"homo_any {p.name}" for p in f.params)
+        params = ", ".join(f"homo_any {cxx_name(p.name)}" for p in f.params)
         self.add(f"homo_any {cxx_fn(f.name)}({params}) {{", f.line)
         self.indent += 1
         # 参数在编译期不知道装的是标量还是数组，两种形式都放行。
@@ -1458,7 +1451,7 @@ class CEmitter:
         self.add("}", f.line)
 
     def emit_class(self, c: Class) -> None:
-        self.add(f"struct {c.name} : homo_object {{", c.line)
+        self.add(f"struct {cxx_name(c.name)} : homo_object {{", c.line)
         self.indent += 1
         for fld in c.fields:
             self.emit_field(fld)
@@ -1501,7 +1494,7 @@ class CEmitter:
                 else:
                     parts.append(f"(_args.size() > {i} ? _args[{i}] "
                                  f": homo_any({self.expr(p.default)}))")
-            self.add(f"return {m.name}({', '.join(parts)});", m.line)
+            self.add(f"return {cxx_name(m.name)}({', '.join(parts)});", m.line)
             self.indent -= 1
             self.add("}", m.line)
         # 名字对但参数个数不对时给出具体原因，而不是「对象没有方法」。
@@ -1530,7 +1523,7 @@ class CEmitter:
                  "long long _homo_line) override {", c.line)
         self.indent += 1
         for fld in c.fields:
-            self.add(f"if (_name == {cpp_quote(fld.name)}) return {fld.name};", fld.line)
+            self.add(f"if (_name == {cpp_quote(fld.name)}) return {cxx_name(fld.name)};", fld.line)
         self.add('homo_runtime_error(_homo_line, "对象没有字段「" + _name + "」");', c.line)
         self.indent -= 1
         self.add("}", c.line)
@@ -1539,7 +1532,7 @@ class CEmitter:
         self.indent += 1
         for fld in c.fields:
             self.add(
-                f"if (_name == {cpp_quote(fld.name)}) {{ {fld.name} = std::move(_v); return; }}",
+                f"if (_name == {cpp_quote(fld.name)}) {{ {cxx_name(fld.name)} = std::move(_v); return; }}",
                 fld.line,
             )
         self.add('homo_runtime_error(_homo_line, "对象没有字段「" + _name + "」");', c.line)
@@ -1560,7 +1553,7 @@ class CEmitter:
                 label = cpp_quote(f"{sep}{fld.name}: ")
                 self.add(f"_homo_s += {label};", fld.line)
                 self.add(
-                    f"_homo_s += homo_repr(this->{fld.name}, true, _homo_depth + 1);",
+                    f"_homo_s += homo_repr(this->{cxx_name(fld.name)}, true, _homo_depth + 1);",
                     fld.line,
                 )
             self.add('_homo_s += " }";', c.line)
@@ -1583,18 +1576,18 @@ class CEmitter:
         if fld.sizes:
             if fld.init is not None and not isinstance(fld.init, ArrayLit):
                 raise HomoError(f"数组字段「{fld.name}」的初值必须是 [ … ] 字面量", fld.line)
-            self.add(f"homo_any {fld.name} = {self.array_value(fld.init, fld.sizes)};", fld.line)
+            self.add(f"homo_any {cxx_name(fld.name)} = {self.array_value(fld.init, fld.sizes)};", fld.line)
         elif fld.init is not None:
             if isinstance(fld.init, ArrayLit):
-                self.add(f"homo_any {fld.name} = {self.array_literal(fld.init)};", fld.line)
+                self.add(f"homo_any {cxx_name(fld.name)} = {self.array_literal(fld.init)};", fld.line)
             else:
-                self.add(f"homo_any {fld.name} = {self.expr(fld.init)};", fld.line)
+                self.add(f"homo_any {cxx_name(fld.name)} = {self.expr(fld.init)};", fld.line)
         else:
-            self.add(f"homo_any {fld.name};", fld.line)
+            self.add(f"homo_any {cxx_name(fld.name)};", fld.line)
 
     def emit_method(self, cls: Class, m: Func) -> None:
-        params = ", ".join(f"homo_any {p.name}" for p in m.params)
-        self.add(f"homo_any {m.name}({params}) {{", m.line)
+        params = ", ".join(f"homo_any {cxx_name(p.name)}" for p in m.params)
+        self.add(f"homo_any {cxx_name(m.name)}({params}) {{", m.line)
         self.indent += 1
         # 方法里可以直接使用字段名，等价于 this->字段；参数在内层，可以遮蔽字段。
         fields = {
@@ -1647,16 +1640,17 @@ class CEmitter:
         raise HomoError("这里不能赋值：赋值目标只能是变量、数组元素或对象字段", s.line)
 
     def emit_var_decl(self, name: str, init_cpp: Optional[str], kind: str, line: int) -> None:
+        cname = cxx_name(name)
         if init_cpp is None:
-            self.add(f"homo_any {name};", line)
+            self.add(f"homo_any {cname};", line)
         elif self.lookup(name) is not None:
             # 遮蔽外层同名变量时，初值里的同名引用指向外层，先落临时再声明。
             tmp = f"_homo_shadow{self.loop_counter}"
             self.loop_counter += 1
             self.add(f"homo_any {tmp} = {init_cpp};", line)
-            self.add(f"homo_any {name} = {tmp};", line)
+            self.add(f"homo_any {cname} = {tmp};", line)
         else:
-            self.add(f"homo_any {name} = {init_cpp};", line)
+            self.add(f"homo_any {cname} = {init_cpp};", line)
         self.declare(name, kind)
 
     def emit_stmt(self, s: Stmt) -> None:
@@ -1678,7 +1672,7 @@ class CEmitter:
                 return
             if s.index is not None:
                 idx = self.expr(s.index)
-                ref = f"homo_index({s.name}, {idx}, {s.line})"
+                ref = f"homo_index({cxx_name(s.name)}, {idx}, {s.line})"
                 rhs = self.expr(s.expr)
                 if s.op == ASSIGN:
                     self.add(f"{ref} = {rhs};", s.line)
@@ -1699,7 +1693,7 @@ class CEmitter:
                 if kind is None:
                     self.emit_var_decl(s.name, value, "array", s.line)
                 elif kind in ("array", "unknown"):
-                    self.add(f"{s.name} = {value};", s.line)
+                    self.add(f"{cxx_name(s.name)} = {value};", s.line)
                 else:
                     raise HomoError(f"「{s.name}」不是数组，不能用数组字面量赋值", s.line)
                 return
@@ -1710,15 +1704,15 @@ class CEmitter:
                 self.emit_var_decl(s.name, None, "scalar", s.line)
             rhs = self.expr(s.expr)
             if s.op == ASSIGN:
-                self.add(f"{s.name} = {rhs};", s.line)
+                self.add(f"{cxx_name(s.name)} = {rhs};", s.line)
             elif s.op == "便乘":
-                self.add(f"{s.name} = homo_mul({s.name}, {rhs});", s.line)
+                self.add(f"{cxx_name(s.name)} = homo_mul({cxx_name(s.name)}, {rhs});", s.line)
             elif s.op == "便减":
-                self.add(f"{s.name} = homo_sub({s.name}, {rhs});", s.line)
+                self.add(f"{cxx_name(s.name)} = homo_sub({cxx_name(s.name)}, {rhs});", s.line)
             elif s.op == "便加":
-                self.add(f"{s.name} = homo_add({s.name}, {rhs});", s.line)
+                self.add(f"{cxx_name(s.name)} = homo_add({cxx_name(s.name)}, {rhs});", s.line)
             elif s.op == "便除":
-                self.add(f"{s.name} = homo_div({s.name}, {rhs}, {s.line});", s.line)
+                self.add(f"{cxx_name(s.name)} = homo_div({cxx_name(s.name)}, {rhs}, {s.line});", s.line)
             else:
                 raise HomoError(f"未知的赋值算子「{s.op}」", s.line)
         elif isinstance(s, CallStmt):
@@ -1895,10 +1889,10 @@ class CEmitter:
         if isinstance(e, NullLit):
             return "homo_null()"
         if isinstance(e, Ident):
-            return e.name
+            return cxx_name(e.name)
         if isinstance(e, New):
             # 显式写全局作用域：局部变量可以和类同名，不能让它遮住构造函数。
-            obj = f"homo_object_of(::{e.class_name}())"
+            obj = f"homo_object_of(::{cxx_name(e.class_name)}())"
             cls = self.classes.get(e.class_name)
             init = next((m for m in cls.methods if m.name == INIT_KW), None) if cls else None
             if init is None:
@@ -1984,8 +1978,36 @@ class CEmitter:
         raise HomoError("无法翻译的表达式", getattr(e, "line", 0))
 
 
+# C++ 关键字和生成代码自己占用的名字。homo 标识符直接写进 C++ 会撞上它们
+# （比如用户把变量叫 int），统一加前缀换成合法且不会冲突的标识符。
+CPP_KEYWORDS = {
+    "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor",
+    "bool", "break", "case", "catch", "char", "char8_t", "char16_t", "char32_t",
+    "class", "compl", "concept", "const", "consteval", "constexpr", "constinit",
+    "const_cast", "continue", "co_await", "co_return", "co_yield", "decltype",
+    "default", "delete", "do", "double", "dynamic_cast", "else", "enum",
+    "explicit", "export", "extern", "false", "float", "for", "friend", "goto",
+    "if", "inline", "int", "long", "mutable", "namespace", "new", "noexcept",
+    "not", "not_eq", "nullptr", "operator", "or", "or_eq", "private",
+    "protected", "public", "register", "reinterpret_cast", "requires", "return",
+    "short", "signed", "sizeof", "static", "static_assert", "static_cast",
+    "struct", "switch", "template", "this", "thread_local", "throw", "true",
+    "try", "typedef", "typeid", "typename", "union", "unsigned", "using",
+    "virtual", "void", "volatile", "wchar_t", "while", "xor", "xor_eq",
+    # 生成代码用到的全局名字（std::、运行时 homo_* 已由前缀规则覆盖）。
+    "main", "std",
+}
+
+
+def cxx_name(name: str) -> str:
+    if (name in CPP_KEYWORDS or name.startswith("homo_")
+            or name.startswith("_homo_")):
+        return "homo_kw_" + name
+    return name
+
+
 def cxx_fn(name: str) -> str:
-    return "homo_main" if name == "main" else name
+    return cxx_name(name)
 
 
 # --------------------------------------------------------------------------
@@ -1999,7 +2021,7 @@ def transpile(source: str) -> tuple[str, list[dict], list[int]]:
     program = Parser(tokens).parse_program()
     check_names(program)
     types = analyze_types(program)
-    cpp, linemap = CEmitter(program, types).emit()
+    cpp, linemap = CEmitter(program).emit()
     return cpp, types, linemap
 
 
