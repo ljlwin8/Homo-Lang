@@ -275,7 +275,8 @@
     font-size: 11.5px;
     color: var(--muted);
   }
-  .status { display: flex; align-items: center; gap: 8px; }
+  .status { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  #status-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dot {
     width: 8px; height: 8px; border-radius: 50%;
     background: #5b6675;
@@ -1107,7 +1108,13 @@
       }
     }
     downloadFile(name, text);
-    setStatus("已保存 " + name, "ok");
+    var safari = /^((?!chrome|chromium|edg|opr|android|crios|fxios).)*safari/i.test(navigator.userAgent);
+    if (safari) {
+      statusText.title = "Safari 不支持选择保存位置的对话框。在 Safari 的 设置 → 通用 → 文件下载位置 选择“每次下载前询问”，下载时就会弹出保存面板，可以指定路径和文件名。";
+      setStatus("已下载 " + name + "（Safari 可开启“每次下载前询问”来选择路径）", "ok");
+    } else {
+      setStatus("已保存 " + name, "ok");
+    }
   }
 
   function openFile() {
