@@ -41,7 +41,8 @@ NULL_KW = "虚无"                  # 空值
 NOT_KW = "迫真"                   # 逻辑非
 LT_KW = "甚至"                    # <
 AND_KW = "且"                     # 逻辑与
-EQ_KW = "就事"                    # ==
+EQ_HEAD = "先辈"                  # 相等比较：(a)先辈(b)说
+EQ_TAIL = "说"
 OR_KW = "或"                      # 逻辑或
 MOD_KW = "化粪"                   # 取模
 CONTINUE_KW = "速达哟"              # continue
@@ -821,11 +822,8 @@ class Parser:
             if self.at_id(LT_KW):
                 t = self.consume()
                 left = Lt(left, self.parse_add(), t.line)
-            elif self.at_id(EQ_KW):
-                t = self.consume()
-                left = Eq(left, self.parse_add(), t.line)
-            elif self.at_id("与") or self.at_id("完全一致"):
-                raise HomoError("等值比较要写成「x 就事 y」", self.peek(0).line)
+            elif self.at_id("就事") or self.at_id("与") or self.at_id("完全一致"):
+                raise HomoError("等值比较要写成「(a)先辈(b)说」", self.peek(0).line)
             elif self.at_id("和"):
                 raise HomoError("逻辑与要写成「x 且 y」", self.peek(0).line)
             else:
@@ -948,6 +946,19 @@ class Parser:
             self.consume()
             node = self.parse_expr()
             self.expect_punc(")")
+            # 相等比较写成 (a)先辈(b)说；两个操作数各自带括号，不会被中缀优先级影响。
+            if self.at_id(EQ_HEAD):
+                op = self.consume()
+                if not self.at_punc("("):
+                    raise HomoError("等值比较要写成「(a)先辈(b)说」", op.line)
+                self.consume()
+                right = self.parse_expr()
+                self.expect_punc(")")
+                tail = self.peek()
+                if tail is None or tail.kind != "id" or tail.text != EQ_TAIL:
+                    raise HomoError("等值比较要写成「(a)先辈(b)说」", op.line)
+                self.consume()
+                node = Eq(node, right, op.line)
         else:
             raise HomoError(f"无法识别的表达式「{t.text}」", t.line)
         return self.parse_postfix(node)
@@ -1153,7 +1164,7 @@ BUILTIN_CALLS = {"脱出", "读入", "读行", RANDOM_KW, LENGTH_KW} | set(STRIN
 RESERVED_VAR_NAMES = {
     DECL, DECL_END, ASSIGN, STMT_END, CALL_END,
     IF_HEAD, IF_MID, ELSEIF_HEAD, ELSEIF_TAIL, ELSE, "极霸矛",
-    WHILE_HEAD, TRUE_KW, FALSE_KW, NULL_KW, NOT_KW, LT_KW, AND_KW, EQ_KW, OR_KW,
+    WHILE_HEAD, TRUE_KW, FALSE_KW, NULL_KW, NOT_KW, LT_KW, AND_KW, EQ_HEAD, OR_KW,
     MOD_KW, CONTINUE_KW, SWITCH_HEAD, CASE_KW, DEFAULT_KW, DO_HEAD, DO_TAIL,
     REPEAT_MID, REPEAT_TAIL, REPEAT_VAR, BREAK_KW, RETURN_KW, CLASS_KW, NEW_KW,
     VARIADIC_KW, PUBLIC_KW, PRIVATE_KW, "import",
