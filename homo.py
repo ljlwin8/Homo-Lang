@@ -1420,7 +1420,12 @@ class CEmitter:
         self.add("int main() {", 0)
         self.indent += 1
         # 输出走管道时默认全缓冲，提示语会迟迟不出现；改成行缓冲以便交互。
+        # 注意：Windows 的 setvbuf 不支持 _IOLBF（等同全缓冲），直接关掉缓冲。
+        self.add("#ifdef _WIN32", 0)
+        self.add("std::setvbuf(stdout, nullptr, _IONBF, 0);", 0)
+        self.add("#else", 0)
         self.add("std::setvbuf(stdout, nullptr, _IOLBF, 0);", 0)
+        self.add("#endif", 0)
         self.add(f"(void){cxx_fn(entry.name)}();", 0)
         self.add("return 0;", 0)
         self.indent -= 1
@@ -2045,7 +2050,8 @@ def build(source: str, workdir: Optional[str] = None) -> dict:
     try:
         proc = subprocess.run(
             [compiler, "-std=c++17", "-O0", "-o", exe, cpp_path],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60,
         )
     except subprocess.TimeoutExpired:
         return {
@@ -2092,7 +2098,7 @@ def run(source: str, timeout: Optional[int] = 5, input_text: Optional[str] = "",
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
         )
         if on_start is not None:
             on_start(proc)
@@ -2121,6 +2127,10 @@ def run(source: str, timeout: Optional[int] = 5, input_text: Optional[str] = "",
 # 命令行入口
 # --------------------------------------------------------------------------
 def main(argv: Optional[list[str]] = None) -> int:
+    if not sys.stdin.isatty():
+        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
+    if not sys.stdout.isatty():
+        sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description="homo 语言编译器：homo → C++ → g++")
     ap.add_argument("source", nargs="?", help="homo 源文件；不写则从标准输入读取")
     ap.add_argument("-o", "--output", help="把可执行文件复制到这个路径")

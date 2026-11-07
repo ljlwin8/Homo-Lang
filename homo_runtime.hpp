@@ -673,12 +673,14 @@ inline homo_value homo_lt_any(const homo_any& a, const homo_any& b, long long li
 inline void homo_print_parts(std::initializer_list<homo_any> parts) {
     for (const auto& p : parts) std::fputs(homo_repr(p, false, 0).c_str(), stdout);
     std::fputc('\n', stdout);
+    std::fflush(stdout);
 }
 
 // 把任意值当作文本输出，并自动换行；容器会自动结构化。
 inline void homo_print_value(const homo_any& v) {
     std::fputs(homo_repr(v, false, 0).c_str(), stdout);
     std::fputc('\n', stdout);
+    std::fflush(stdout);
 }
 
 // 按 C 风格格式串输出；每个转换符消耗一个 homo_value。
@@ -740,6 +742,7 @@ inline void homo_print(const char* fmt, std::initializer_list<homo_value> args) 
                 break;
         }
     }
+    std::fflush(stdout);
 }
 
 inline void homo_print(const char* fmt) { homo_print(fmt, {}); }
