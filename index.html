@@ -1100,6 +1100,9 @@
   function quoteFamily(ch) { return QUOTE_FAMILY[ch] || 0; }
   var INDENT_UNIT = "    ";
   var autoPairing = false;
+  // 最近一次「跳过已有闭合符」的时间：input 和 compositionend 两条路径都会检查，
+  // 避免同一次输入法提交被处理两遍。
+  var lastDedupeAt = 0;
 
   // 光标前未闭合的括号层数；字符串、注释里的括号不算。
   function scopeDepthAt(src, pos) {
@@ -1151,6 +1154,7 @@
 
   // 删掉刚敲进去的重复闭合符号，把光标移到已有那只的后面。
   function skipTypedDuplicate() {
+    lastDedupeAt = Date.now();
     var pos = editor.selectionStart;
     editor.setSelectionRange(pos - 1, pos);
     var removed = false;
@@ -1228,11 +1232,13 @@
     updateCursor();
 
     var d = e.data;
-    if (!d || d.length !== 1) return;
     if (e.isComposing || !PAIR_INPUT_TYPES[e.inputType]) return;
     if (autoPairing) return;
     var pos = editor.selectionStart;
+    if (pos !== editor.selectionEnd || pos <= 0) return;
     var value = editor.value;
+    // 部分 Windows 输入法提交时 e.data 为 null 或带多个字符：退回用光标前的字符判断。
+    if (!d || d.length !== 1) d = value.charAt(pos - 1);
 
     if (d === "「" || d === "」") {
       convertCornerBracket(d === "」");
@@ -1302,6 +1308,17 @@
       var d = value.charAt(pos - 1);
       if (d === "「" || d === "」") {
         convertCornerBracket(d === "」");
+        return;
+      }
+      // 输入法提交闭合符（Windows 上常常整段走合成事件，input 里判断不到）：
+      // 光标前是刚提交的闭合符、光标后已有同种闭合符时，跳过刚提交的这只。
+      if (PAIR_CLOSERS[d]) {
+        if (value.charAt(pos) === d && Date.now() - lastDedupeAt >= 80) skipTypedDuplicate();
+        return;
+      }
+      if (QUOTE_CLOSERS[d]) {
+        if (quoteFamily(value.charAt(pos)) === quoteFamily(d) &&
+            Date.now() - lastDedupeAt >= 80) skipTypedDuplicate();
         return;
       }
       var closer = QUOTE_PAIRS[d] || AUTO_PAIRS[d];
