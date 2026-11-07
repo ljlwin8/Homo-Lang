@@ -1271,19 +1271,29 @@ def check_names(program: Program) -> None:
             if e.class_name not in class_names:
                 raise HomoError(f"未定义的类「{e.class_name}」", e.line)
             cls = classes_by_name[e.class_name]
-            init = next((m for m in cls.methods if m.name == INIT_KW), None)
-            if init is None:
+            inits = [m for m in cls.methods if m.name == INIT_KW]
+            if not inits:
                 if e.args:
                     raise HomoError(
                         f"类「{e.class_name}」没有「{INIT_KW}」，新建时不能带参数", e.line
                     )
             else:
-                required, maximum = param_arity(init.params)
-                if len(e.args) < required or (maximum is not None
-                                              and len(e.args) > maximum):
+                # 多个「首」按实参个数选择，和运行时分发时的顺序一致。
+                matching = [
+                    m for m in inits
+                    if param_arity(m.params)[0] <= len(e.args)
+                    and (param_arity(m.params)[1] is None
+                         or len(e.args) <= param_arity(m.params)[1])
+                ]
+                if not matching:
+                    if len(inits) == 1:
+                        raise HomoError(
+                            arity_message("函数", f"{e.class_name}.{INIT_KW}",
+                                          inits[0].params, len(e.args)),
+                            e.line,
+                        )
                     raise HomoError(
-                        arity_message("函数", f"{e.class_name}.{INIT_KW}",
-                                      init.params, len(e.args)),
+                        f"类「{e.class_name}」的「{INIT_KW}」没有接受 {len(e.args)} 个参数的版本",
                         e.line,
                     )
             for a in e.args:
@@ -1405,6 +1415,16 @@ def check_names(program: Program) -> None:
         check_stmts(f.body, Scopes(global_names, {p.name for p in f.params}), global_calls)
     for c in program.classes:
         field_names = {fld.name for fld in c.fields}
+        # 同名方法靠参数个数区分；C++ 无法区分参数个数也相同的两个成员函数。
+        signatures: set[tuple[str, int]] = set()
+        for m in c.methods:
+            sig = (m.name, len(m.params))
+            if sig in signatures:
+                raise HomoError(
+                    f"类「{c.name}」有多个「{m.name}」都接受 {len(m.params)} 个参数",
+                    m.line,
+                )
+            signatures.add(sig)
         for fld in c.fields:
             for size in fld.sizes:
                 check_expr(size, Scopes(global_names, field_names), global_calls)
@@ -1591,10 +1611,9 @@ class CEmitter:
         for m in c.methods:
             required, maximum = param_arity(m.params)
             cond = f"_name == {cpp_quote(m.name)}"
-            if m.params:
-                cond += f" && _args.size() >= {required}"
-                if maximum is not None:
-                    cond += f" && _args.size() <= {maximum}"
+            cond += f" && _args.size() >= {required}"
+            if maximum is not None:
+                cond += f" && _args.size() <= {maximum}"
             self.add(f"if ({cond}) {{", m.line)
             self.indent += 1
             parts: list[str] = []
@@ -1611,8 +1630,6 @@ class CEmitter:
             self.add("}", m.line)
         # 名字对但参数个数不对时给出具体原因，而不是「对象没有方法」。
         for m in c.methods:
-            if not m.params:
-                continue
             required, maximum = param_arity(m.params)
             if required == 0 and maximum is None:
                 continue
