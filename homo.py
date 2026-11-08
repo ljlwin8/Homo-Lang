@@ -1577,7 +1577,7 @@ class CEmitter:
         self.add("}", f.line)
 
     def emit_class(self, c: Class) -> None:
-        self.add(f"struct {cxx_name(c.name)} : homo_object {{", c.line)
+        self.add(f"struct {cxx_class(c.name)} : homo_object {{", c.line)
         self.indent += 1
         for fld in c.fields:
             self.emit_field(fld)
@@ -2032,7 +2032,7 @@ class CEmitter:
             return cxx_name(e.name)
         if isinstance(e, New):
             # 显式写全局作用域：局部变量可以和类同名，不能让它遮住构造函数。
-            obj = f"homo_object_of(::{cxx_name(e.class_name)}())"
+            obj = f"homo_object_of(::{cxx_class(e.class_name)}())"
             cls = self.classes.get(e.class_name)
             init = next((m for m in cls.methods if m.name == INIT_KW), None) if cls else None
             if init is None:
@@ -2144,6 +2144,12 @@ def cxx_name(name: str) -> str:
             or name.startswith("_homo_")):
         return "homo_kw_" + name
     return name
+
+
+def cxx_class(name: str) -> str:
+    # 类名单独加前缀：C++ 不允许成员函数或字段和类同名，
+    # 例如「类 首」里的构造方法「首」会生成 `struct 首 { homo_any 首(); }`。
+    return "homo_cls_" + cxx_name(name)
 
 
 def cxx_fn(name: str) -> str:

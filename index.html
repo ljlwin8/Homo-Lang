@@ -196,6 +196,7 @@
   .tok-bool  { color: #2e4fd0; }
   .tok-fn    { color: #c678dd; }
   .tok-cls   { color: #4ec9b0; }
+  .tok-class { color: rgb(239, 131, 119); }
   .tok-param { color: #d19a66; }
   .tok-loopvar { color: #3b6fe0; }
   .tok-null  { color: #2e4fd0; }
@@ -496,7 +497,7 @@
     "我已经等不及了": "kw",
     "速达哟": "kw",
     "人幸终": "kw",
-    "类": "kw",
+    "类": "class",
     "新建": "kw",
     "想看就看个够": "kw",
     "摄影禁止": "kw",
@@ -1359,7 +1360,7 @@
   var AC_KIND_LABELS = {
     decl: "声明", sep: "语法", kw: "关键字", op: "运算符",
     bool: "布尔", fn: "内置", cls: "类名", loopvar: "循环变量",
-    null: "空值"
+    null: "空值", class: "关键字"
   };
   var AC_KEYWORDS = Object.keys(HL_WORDS).map(function (w) {
     return { text: w, kind: AC_KIND_LABELS[HL_WORDS[w]] || "关键字" };
