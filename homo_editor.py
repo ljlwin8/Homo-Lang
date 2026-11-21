@@ -26,7 +26,7 @@ from typing import Optional
 import homo
 
 APP_NAME = "homo 编辑器"
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.1.45"
 IS_MAC = sys.platform == "darwin"
 IS_WIN = os.name == "nt"
 MOD = "Command" if IS_MAC else "Control"
@@ -813,7 +813,11 @@ class EditorTab(ttk.Frame):
         self.text.bind("<KP_Enter>", self._on_return)
         self.text.bind("<Tab>", self._on_tab)
         self.text.bind("<Shift-Tab>", self._on_shift_tab)
-        self.text.bind("<ISO_Left_Tab>", self._on_shift_tab)
+        try:
+            # 旧版 Windows Tk 没有 ISO_Left_Tab keysym，绑定会抛 TclError。
+            self.text.bind("<ISO_Left_Tab>", self._on_shift_tab)
+        except tk.TclError:
+            pass
         self.text.bind("<Control-space>", self.show_completion)
         self.text.bind("<Command-j>", self.show_completion)
         self.text.bind("<Escape>", self._on_escape)
@@ -2551,7 +2555,13 @@ class HomoEditorApp(tk.Tk):
         self.refresh_tree()
         self._pick_default_main()
         if self.root_path:
-            self.open_path(self.root_path)
+            try:
+                opened = self.open_path(self.root_path)
+            except Exception as exc:  # noqa: BLE001
+                opened = None
+                messagebox.showerror("打开主程序失败", str(exc), parent=self)
+            if opened is None:
+                self._new_untitled(self._starter_text())
         else:
             self._new_untitled(self._starter_text())
         self._update_root_label()

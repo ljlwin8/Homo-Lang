@@ -12,6 +12,8 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
+import subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
@@ -421,6 +423,99 @@ class InmTests(unittest.TestCase):
         self.assertTrue(result["ok"], result["compile_output"])
         self.assertIn("运行错误（库.homo 第 2 行）", result["stderr"])
         self.assertIn("除数不能为 0", result["stderr"])
+
+
+    def test_msvc_linker_error_is_parsed(self) -> None:
+        diagnostics = homo.cpp_diagnostics(
+            "main.obj : error LNK2019: unresolved external symbol \"foo\"\n"
+            "LINK : fatal error LNK1104: cannot open file 'foo.lib'\n"
+        )
+        self.assertEqual(len(diagnostics), 2)
+        self.assertEqual(diagnostics[0]["severity"], "错误")
+        self.assertEqual(diagnostics[0]["file"], "main.obj")
+        self.assertIn("LNK2019", diagnostics[0]["message"])
+        self.assertEqual(diagnostics[1]["severity"], "错误")
+        self.assertIn("LNK1104", diagnostics[1]["message"])
+        self.assertEqual(diagnostics[1]["line"], 0)
+
+    def test_msvc_command_line_error_is_parsed(self) -> None:
+        diagnostics = homo.cpp_diagnostics(
+            "cl : Command line error D8021 : invalid numeric argument '/bad'\n"
+        )
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics[0]["file"], "cl")
+        self.assertIn("D8021", diagnostics[0]["message"])
+
+    def test_msvc_compile_error_maps_to_source(self) -> None:
+        source_map = homo.SourceMap()
+        source_map.add(None, "a\nb\nc\n")
+        linemap = [0, 1, 3]
+        rewritten = homo.rewrite_diagnostics(
+            "main.cpp(3): error C2059: syntax error: ';'\n", linemap, source_map,
+        )
+        diagnostics = homo.cpp_diagnostics(rewritten, source_map)
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics[0]["line"], 3)
+        self.assertEqual(diagnostics[0]["message"], "C2059: syntax error: ';'")
+
+    def test_gbk_compiler_output_decodes(self) -> None:
+        raw = "main.cpp(3): error C2059: 语法错误:“;”\n".encode("gbk")
+        text = homo.decode_compiler_output(raw, "cp936")
+        self.assertIn("语法错误", text)
+        self.assertIn("main.cpp(3)", text)
+
+    def test_unparseable_compiler_output_is_preserved(self) -> None:
+        diagnostics = homo.raw_compiler_diagnostics(
+            "'cl.exe' is not recognized as an internal or external command\n", 1,
+        )
+        self.assertEqual(len(diagnostics), 1)
+        self.assertIn("cl.exe", diagnostics[0]["message"])
+        empty = homo.raw_compiler_diagnostics("", 1)
+        self.assertIn("退出代码 1", empty[0]["message"])
+
+
+    def test_build_reports_msvc_linker_error(self) -> None:
+        completed = subprocess.CompletedProcess(
+            [], 1,
+            b"main.obj : error LNK2019: unresolved external symbol \"foo\"\r\n",
+            b"",
+        )
+        with mock.patch("homo.find_compiler",
+                        return_value=homo.Compiler("cl.exe", "msvc", None, "MSVC")), \
+                mock.patch("homo._run_cpp_compiler", return_value=completed):
+            result = homo.build("会员制餐厅(){ (0)人幸终 }\n")
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["diagnostics"])
+        self.assertIn("LNK2019", result["diagnostics"][0]["message"])
+
+    def test_build_preserves_unparseable_compiler_output(self) -> None:
+        completed = subprocess.CompletedProcess(
+            [], 1, b"'cl.exe' is not recognized\r\n", b"",
+        )
+        with mock.patch("homo.find_compiler",
+                        return_value=homo.Compiler("cl.exe", "msvc", None, "MSVC")), \
+                mock.patch("homo._run_cpp_compiler", return_value=completed):
+            result = homo.build("会员制餐厅(){ (0)人幸终 }\n")
+        self.assertFalse(result["ok"])
+        self.assertIn("cl.exe", result["diagnostics"][0]["message"])
+        self.assertNotIn("没有给出可解析", result["diagnostics"][0]["message"])
+
+
+    def test_msvc_vcvars_is_passed_as_separate_argv(self) -> None:
+        compiler = homo.Compiler(
+            r"C:\Program Files\VS\VC\Tools\MSVC\bin\cl.exe",
+            "msvc",
+            r"C:\Program Files\VS\VC\Auxiliary\Build\vcvars64.bat",
+            "MSVC",
+        )
+        completed = subprocess.CompletedProcess([], 0, b"", b"")
+        with mock.patch("homo.subprocess.run", return_value=completed) as run:
+            homo._run_cpp_compiler(compiler, ".", "main.cpp", "homo.exe")
+        argv = run.call_args.args[0]
+        self.assertIn("call", argv)
+        self.assertIn(compiler.vcvars, argv)
+        self.assertFalse(any("call " in str(part) and "&&" in str(part)
+                             for part in argv))
 
 
 if __name__ == "__main__":

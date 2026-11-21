@@ -3149,20 +3149,21 @@ def _run_cpp_compiler(compiler: Compiler, workdir: str, cpp_path: str, exe: str)
     if compiler.kind == "msvc":
         cpp_name = os.path.basename(cpp_path)
         exe_name = os.path.basename(exe)
-        cline = (f'"{compiler.path}" /nologo /std:c++17 /EHsc /O2 /utf-8 '
-                 f'"{cpp_name}" /Fe:"{exe_name}"')
+        cl_args = [compiler.path, "/nologo", "/std:c++17", "/EHsc", "/O2", "/utf-8",
+                   cpp_name, f"/Fe:{exe_name}"]
         if compiler.vcvars:
-            # 通过 cmd 先加载 VS 环境；命令走 Unicode 命令行，避免批处理编码问题。
-            cmdline = f'call "{compiler.vcvars}" >nul && {cline}'
-            argv = ["cmd.exe", "/d", "/c", cmdline]
+            # vcvars 路径通常含空格。不要把整条命令拼成一个字符串再交给
+            # cmd /c（外层引号会把 "vcvars64.bat" 当成命令名），逐参数传递。
+            argv = ["cmd.exe", "/d", "/c", "call", compiler.vcvars,
+                    ">nul", "&&"] + cl_args
         else:
             # cl.exe 已在 PATH 上（通常已经进过 VS 环境），直接调用避免 cmd 引号问题。
-            argv = [compiler.path, "/nologo", "/std:c++17", "/EHsc", "/O2", "/utf-8",
-                    cpp_name, f"/Fe:{exe_name}"]
-        encoding = locale.getpreferredencoding(False) or "utf-8"
+            argv = cl_args
+        # cl.exe 的诊断输出通常使用系统 ANSI/OEM 代码页（中文 Windows 是 GBK），
+        # 不能假定 UTF-8；先收字节，再按候选编码解码。
         return subprocess.run(
             argv, cwd=workdir,
-            capture_output=True, text=True, encoding=encoding, errors="replace",
+            capture_output=True, text=False,
             timeout=120, creationflags=flags,
         )
     args = [compiler.path, "-std=c++17", "-O0", "-o", exe, cpp_path]
@@ -3180,9 +3181,51 @@ def _run_cpp_compiler(compiler: Compiler, workdir: str, cpp_path: str, exe: str)
 # --------------------------------------------------------------------------
 # 编译 / 运行
 # --------------------------------------------------------------------------
+def decode_compiler_output(raw: bytes, preferred: str) -> str:
+    """解码 C++ 编译器输出；MSVC 在中文 Windows 上通常是 GBK。"""
+    if not raw:
+        return ""
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            return raw.decode("utf-16")
+        except UnicodeDecodeError:
+            pass
+    if raw.count(b"\x00") > max(2, len(raw) // 4):
+        for enc in ("utf-16-le", "utf-16-be"):
+            try:
+                return raw.decode(enc)
+            except UnicodeDecodeError:
+                pass
+    candidates = ["utf-8-sig", "utf-8", preferred, "gbk", "cp936", "mbcs", "cp1252"]
+    for enc in candidates:
+        if not enc:
+            continue
+        try:
+            return raw.decode(enc)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode(preferred or "utf-8", errors="replace")
+
+
 CPP_DIAG_RE = re.compile(
     r"^(?P<file>.+?):(?P<line>\d+)(?::(?P<col>\d+))?:\s*"
     r"(?P<sev>fatal error|error|warning|note|错误|警告|注意)\s*[:：]?\s*(?P<msg>.*)$",
+    re.IGNORECASE,
+)
+CPP_DIAG_PAREN_RE = re.compile(
+    r"^(?P<file>.+?)\((?P<line>\d+)(?:,(?P<col>\d+))?\):\s*"
+    r"(?P<sev>fatal error|error|warning|note)\s*[:：]?\s*(?P<msg>.*)$",
+    re.IGNORECASE,
+)
+CPP_DIAG_NO_LINE_RE = re.compile(
+    r"^(?P<file>.+?)\s*:\s*(?:Command line\s+)?"
+    r"(?P<sev>fatal error|error|warning|note)\s+"
+    r"(?P<code>[A-Z]+\d+)\s*:\s*(?P<msg>.*)$",
+    re.IGNORECASE,
+)
+CPP_DIAG_BARE_RE = re.compile(
+    r"^(?P<sev>fatal error|error|warning|note)\s+"
+    r"(?P<code>[A-Z]+\d+)\s*:\s*(?P<msg>.*)$",
     re.IGNORECASE,
 )
 SEVERITY_LABELS = {
@@ -3235,27 +3278,84 @@ def rewrite_diagnostics(text: str, linemap: list[int],
     return "\n".join(kept)
 
 
+def _compiler_diagnostic(file: str, line: int, column: int,
+                         severity: str, message: str,
+                         source_map: Optional[SourceMap]) -> dict:
+    path = None
+    if source_map is not None and file:
+        path = source_map.path_for_display(file)
+    return {
+        "severity": severity,
+        "file": file,
+        "path": path or "",
+        "line": line,
+        "column": column,
+        "message": message.strip(),
+    }
+
+
 def cpp_diagnostics(text: str, source_map: Optional[SourceMap] = None) -> list[dict]:
     out: list[dict] = []
     for raw in text.splitlines():
-        m = CPP_DIAG_RE.match(raw.strip())
-        if not m:
+        line = raw.strip()
+        m = CPP_DIAG_RE.match(line)
+        if m:
+            sev_raw = m.group("sev").lower()
+            severity = SEVERITY_LABELS.get(sev_raw, "错误")
+            out.append(_compiler_diagnostic(
+                m.group("file"), int(m.group("line")),
+                int(m.group("col") or 0), severity, m.group("msg"), source_map,
+            ))
             continue
-        sev_raw = m.group("sev").lower()
-        severity = SEVERITY_LABELS.get(sev_raw, "错误")
-        file = m.group("file")
-        path = None
-        if source_map is not None:
-            path = source_map.path_for_display(file)
-        out.append({
-            "severity": severity,
-            "file": file,
-            "path": path or "",
-            "line": int(m.group("line")),
-            "column": int(m.group("col") or 0),
-            "message": m.group("msg").strip(),
-        })
+        # MSVC 的原始格式：main.cpp(3): error C2059: ...
+        # 即使源码行映射失败，也先保留行号和信息。
+        m = CPP_DIAG_PAREN_RE.match(line)
+        if m:
+            sev_raw = m.group("sev").lower()
+            out.append(_compiler_diagnostic(
+                m.group("file"), int(m.group("line")),
+                int(m.group("col") or 0),
+                SEVERITY_LABELS.get(sev_raw, "错误"), m.group("msg"), source_map,
+            ))
+            continue
+        # MSVC / clang-cl 的链接器错误和命令行错误没有源码行号：
+        # main.obj : error LNK2019: ...
+        # LINK : fatal error LNK1104: ...
+        # cl : Command line error D8021 : ...
+        m = CPP_DIAG_NO_LINE_RE.match(line)
+        if m:
+            sev_raw = m.group("sev").lower()
+            message = f"{m.group('code')}: {m.group('msg')}".strip()
+            out.append(_compiler_diagnostic(
+                m.group("file"), 0, 0,
+                SEVERITY_LABELS.get(sev_raw, "错误"), message, source_map,
+            ))
+            continue
+        # 某些驱动只输出：error C2065: ...
+        m = CPP_DIAG_BARE_RE.match(line)
+        if m:
+            sev_raw = m.group("sev").lower()
+            message = f"{m.group('code')}: {m.group('msg')}".strip()
+            out.append(_compiler_diagnostic(
+                "", 0, 0, SEVERITY_LABELS.get(sev_raw, "错误"), message, source_map,
+            ))
     return out
+
+
+def raw_compiler_diagnostics(output: str, returncode: int) -> list[dict]:
+    """解析失败时不要吞掉编译器输出；把最后几行原样放进问题列表。"""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return [{
+            "severity": "错误", "file": "", "path": "", "line": 0,
+            "column": 0,
+            "message": f"C++ 编译器退出代码 {returncode}，但没有输出",
+        }]
+    # 保留最后 20 行，避免模板/链接器长输出淹没界面。
+    return [{
+        "severity": "错误", "file": "", "path": "", "line": 0,
+        "column": 0, "message": line[:2000],
+    } for line in lines[-20:]]
 
 
 def build(source=None, workdir: Optional[str] = None, *,
@@ -3299,7 +3399,17 @@ def build(source=None, workdir: Optional[str] = None, *,
             "compile_output": f"无法启动 C++ 编译器：{exc}", "workdir": workdir,
             "exe": None, "compiler": None,
         }
-    raw_output = (proc.stdout or "") + (proc.stderr or "")
+    raw_stdout = proc.stdout or b""
+    raw_stderr = proc.stderr or b""
+    if isinstance(raw_stdout, bytes) or isinstance(raw_stderr, bytes):
+        preferred = locale.getpreferredencoding(False) or "utf-8"
+        raw_output = decode_compiler_output(
+            (raw_stdout if isinstance(raw_stdout, bytes) else str(raw_stdout).encode("utf-8"))
+            + (raw_stderr if isinstance(raw_stderr, bytes) else str(raw_stderr).encode("utf-8")),
+            preferred,
+        )
+    else:
+        raw_output = str(raw_stdout) + str(raw_stderr)
     output = rewrite_diagnostics(raw_output, linemap, sm).strip()
     ok = proc.returncode == 0
     if ok and not os.path.isfile(exe):
@@ -3307,10 +3417,7 @@ def build(source=None, workdir: Optional[str] = None, *,
         output = (output + "\n编译器没有生成可执行文件").strip()
     diagnostics = cpp_diagnostics(output, sm)
     if not ok and not diagnostics:
-        diagnostics = [{
-            "severity": "错误", "file": "", "path": "", "line": 0, "column": 0,
-            "message": "C++ 编译失败（编译器没有给出可解析的错误信息）",
-        }]
+        diagnostics = raw_compiler_diagnostics(output, proc.returncode)
     return {
         "ok": ok, "cpp": cpp, "types": types, "linemap": linemap,
         "source_map": sm, "units": compiled.units, "diagnostics": diagnostics,
