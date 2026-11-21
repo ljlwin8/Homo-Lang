@@ -351,16 +351,52 @@ class InmTests(unittest.TestCase):
             homo.compile_source(self.read(main), path=main)
         self.assertIn("没有类「不存在」", homo.format_error(ctx.exception))
 
-    def test_full_and_selective_same_file_rejected(self) -> None:
-        self.write("类定义.homo", "类 A { 加(){ (1)人幸终 } }\n")
+    @NEEDS_COMPILER
+    def test_full_and_selective_same_file_loads_each_class_once(self) -> None:
+        self.write("类定义.homo", """
+            类 A { 值(){ (1)人幸终 } }
+            类 B { 值(){ (2)人幸终 } }
+        """)
+        # 先选择性导入 A，再整文件导入：整文件只补充 B，不能重复定义 A。
         main = self.write("main.homo", """
             inm A from 类定义
             inm 类定义
+            会员制餐厅(){
+                你是一个一个一个 a 事 新建 A() 罢
+                你是一个一个一个 b 事 新建 B() 罢
+                脱出(a.值())噗叽啪
+                脱出(b.值())噗叽啪
+                (0)人幸终
+            }
+        """)
+        result = homo.run(self.read(main), path=main, timeout=30)
+        self.assertTrue(result["ok"], result["compile_output"])
+        self.assertIn("1", result["stdout"])
+        self.assertIn("2", result["stdout"])
+
+        # 反过来先整文件、再选择性导入：选择性导入应当是空操作。
+        reverse = self.write("reverse.homo", """
+            inm 类定义
+            inm A from 类定义
+            会员制餐厅(){
+                你是一个一个一个 a 事 新建 A() 罢
+                脱出(a.值())噗叽啪
+                (0)人幸终
+            }
+        """)
+        result = homo.run(self.read(reverse), path=reverse, timeout=30)
+        self.assertTrue(result["ok"], result["compile_output"])
+
+    def test_selective_class_still_checked_after_full_import(self) -> None:
+        self.write("类定义.homo", "类 A { 值(){ (1)人幸终 } }\n")
+        main = self.write("main.homo", """
+            inm 类定义
+            inm Missing from 类定义
             会员制餐厅(){ (0)人幸终 }
         """)
         with self.assertRaises(homo.HomoError) as ctx:
             homo.compile_source(self.read(main), path=main)
-        self.assertIn("不能同时整体 inm", homo.format_error(ctx.exception))
+        self.assertIn("文件里没有类「Missing」", homo.format_error(ctx.exception))
 
     @NEEDS_COMPILER
     def test_multiple_imported_homo_files(self) -> None:

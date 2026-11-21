@@ -410,7 +410,6 @@ def highlight_tokens(source: str) -> list[tuple[int, int, str]]:
     pending_params: Optional[list[str]] = None
     expect_class = False
     bracket_depth = 0
-    defined = _hl_defined_functions(source)
 
     def emit(kind: str, start: int, end: int) -> None:
         if kind and end > start:
@@ -534,7 +533,9 @@ def highlight_tokens(source: str) -> list[tuple[int, int, str]]:
                     kind = "cls"
                 elif pending_params is not None and word in pending_params:
                     kind = "param"
-                elif has_call and word in defined:
+                elif has_call:
+                    # 任何后面紧跟括号的标识符都是函数/方法调用；
+                    # 这样从其他 .homo 引入的函数也能和本地调用同色。
                     kind = "fn"
                 else:
                     kind = "id"

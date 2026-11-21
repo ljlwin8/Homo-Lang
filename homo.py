@@ -2867,6 +2867,18 @@ def load_program(root_path: Optional[str], root_source: Optional[str] = None,
         return Program(functions=[], classes=classes, globals=[], imports=[],
                        declarations=[], global_decls=[], class_decls=[])
 
+    def without_classes(program: Program, names: set[str]) -> Program:
+        """整文件导入时去掉此前已经选择性导入过的类，避免重复定义。"""
+        return Program(
+            functions=program.functions,
+            classes=[c for c in program.classes if c.name not in names],
+            globals=program.globals,
+            imports=[],
+            declarations=program.declarations,
+            global_decls=program.global_decls,
+            class_decls=program.class_decls,
+        )
+
     def ensure_imports(program: Program, real: str) -> None:
         if real in imports_loaded:
             return
@@ -2884,14 +2896,7 @@ def load_program(root_path: Optional[str], root_source: Optional[str] = None,
         if selected_class is None:
             if state is None:
                 return
-            if state != "unloaded":
-                err = HomoError(
-                    "同一个文件不能同时整体 inm 和只 inm 某个类",
-                    import_line, file=sm.display_path(importer) if importer else None,
-                    path=importer,
-                )
-                err.source_map = sm
-                raise err
+            selected = state if isinstance(state, set) else set()
             program, unit = cached_parse(real, source_override)
             if is_root:
                 root_program, root_unit = program, unit
@@ -2901,11 +2906,16 @@ def load_program(root_path: Optional[str], root_source: Optional[str] = None,
                 ensure_imports(program, real)
             finally:
                 active.pop()
-            modules.append((program, real))
+            # 之前已经选择性导入过的类已经进入 modules；整文件导入只补其余定义。
+            modules.append((without_classes(program, selected) if selected else program,
+                            real))
             return
 
         # 只导入某个类
         if state is None:
+            # 整文件已经导入过，类一定已经包含在内；仍需检查类是否存在。
+            program, _unit = cached_parse(real, source_override)
+            filter_class(program, selected_class, importer, import_line)
             return
         if state == "unloaded":
             state = set()
