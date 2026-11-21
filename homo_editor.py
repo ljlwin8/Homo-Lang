@@ -26,7 +26,7 @@ from typing import Optional
 import homo
 
 APP_NAME = "homo 编辑器"
-APP_VERSION = "5.12"
+APP_VERSION = "1.1.4"
 IS_MAC = sys.platform == "darwin"
 IS_WIN = os.name == "nt"
 MOD = "Command" if IS_MAC else "Control"
