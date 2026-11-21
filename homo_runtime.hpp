@@ -95,9 +95,24 @@ inline homo_value homo_null_value() {
     return v;
 }
 
-// 运行期错误统一从这里退出，错误信息带 homo 源码行号。
+// 运行期错误统一从这里退出，错误信息带 homo 源码文件和行号。
+// 生成代码会提供 homo_lookup_location：把生成 C++ 里的全局行号换回
+// 用户看到的「文件 + 文件内行号」，多文件 import 时也能指对位置。
+struct homo_source_location {
+    const char* file;
+    long long line;
+};
+
+homo_source_location homo_lookup_location(long long line);
+
 [[noreturn]] inline void homo_runtime_error(long long line, const std::string& msg) {
-    std::fprintf(stderr, "运行错误（第 %lld 行）：%s\n", line, msg.c_str());
+    homo_source_location loc = homo_lookup_location(line);
+    if (loc.file && loc.file[0]) {
+        std::fprintf(stderr, "运行错误（%s 第 %lld 行）：%s\n",
+                     loc.file, loc.line, msg.c_str());
+    } else {
+        std::fprintf(stderr, "运行错误（第 %lld 行）：%s\n", line, msg.c_str());
+    }
     std::exit(51);
 }
 

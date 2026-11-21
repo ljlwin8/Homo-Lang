@@ -6,3 +6,7 @@ __pycache__/
 .vscode/
 .claude/settings.local.json
 test.c
+dist/
+build/
+.build-venv/
+*.spec

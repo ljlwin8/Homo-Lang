@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""homo 语言编译器：homo → C++ → g++。
+"""homo 语言编译器：homo → C++17 → 原生可执行文件。
 
 homo 源码里所有变量都用「你是一个一个一个」声明，不写类型；
 编译器负责自动推导变量类型（整数 / 浮点数 / 字符串），
 并把「事」「便乘」等词形算子翻译成 C++ 调用。
+
+支持用 inm 引用 .homo 文件里的声明与定义；
+Windows / macOS 上都可以调用系统 C++ 编译器生成原生程序。
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import locale
 import os
 import re
 import shutil
@@ -73,7 +78,7 @@ STRING_BUILTIN_ARITY = {
 
 COMPOUND_OPS = {"便乘": "*", "便减": "-", "便加": "+", "便除": "/"}
 ASSIGN_OPS = {ASSIGN} | set(COMPOUND_OPS)
-PUNCTUATION = set("{}()[],;+-*/.")
+PUNCTUATION = set("{}()[],;+-*/.:")
 # 半角/全角引号都可以当字符串边界，且可以混用（开一种、闭另一种）。
 QUOTE_CHARS = set("\"“”‘’'")
 # 字符串可以用任意引号开头，由「同族的引号」闭合：
@@ -84,15 +89,19 @@ QUOTE_CLOSERS = {
     "'": "'’", "‘": "'‘’", "’": "'‘’",
 }
 # 允许全角/半角括号、逗号混用；token 内统一成半角文本。
-FULLWIDTH_PUNC = {"（": "(", "）": ")", "，": ","}
+FULLWIDTH_PUNC = {"（": "(", "）": ")", "，": ",", "；": ";", "：": ":"}
 PUNCTUATION |= set(FULLWIDTH_PUNC)
 
 
 class HomoError(Exception):
-    def __init__(self, msg: str, line: int = 0):
+    def __init__(self, msg: str, line: int = 0, file: Optional[str] = None,
+                 path: Optional[str] = None):
         super().__init__(msg)
         self.msg = msg
-        self.line = line
+        self.line = line          # 加载多文件后是全局行号，由 SourceMap 换算
+        self.file = file          # 展示用路径（相对项目根目录）
+        self.path = path          # 绝对路径
+        self.source_map = None
 
 
 # --------------------------------------------------------------------------
@@ -405,19 +414,50 @@ class Class:
 
 
 @dataclass
+class ImportDecl:
+    target: str
+    line: int = 0
+    selected_class: Optional[str] = None
+
+
+@dataclass
+class FuncDecl:
+    """函数声明（没有函数体），定义由同文件或链接的 .homo 文件提供。"""
+    name: str
+    params: list[Param]
+    line: int = 0
+    private: bool = False
+
+
+@dataclass
+class ClassDecl:
+    """类声明（.inm），实现由 .homo 里的类定义提供。"""
+    name: str
+    fields: list[Decl]
+    methods: list[FuncDecl]
+    line: int = 0
+
+
+@dataclass
 class Program:
     functions: list[Func]
     classes: list[Class] = field(default_factory=list)
     globals: list[Decl] = field(default_factory=list)
+    imports: list[ImportDecl] = field(default_factory=list)
+    declarations: list[FuncDecl] = field(default_factory=list)
+    global_decls: list[Decl] = field(default_factory=list)
+    class_decls: list[ClassDecl] = field(default_factory=list)
+    entry: Optional[Func] = None
 
 
 # --------------------------------------------------------------------------
 # 语法分析
 # --------------------------------------------------------------------------
 class Parser:
-    def __init__(self, tokens: list[Token]):
+    def __init__(self, tokens: list[Token], declaration_mode: bool = False):
         self.tokens = tokens
         self.pos = 0
+        self.declaration_mode = declaration_mode
 
     # -- 基础工具 ------------------------------------------------------
     def peek(self, k: int = 0) -> Optional[Token]:
@@ -470,34 +510,206 @@ class Parser:
         funcs: list[Func] = []
         classes: list[Class] = []
         globals_: list[Decl] = []
+        imports: list[ImportDecl] = []
+        declarations: list[FuncDecl] = []
+        global_decls: list[Decl] = []
+        class_decls: list[ClassDecl] = []
         while not self.at_end():
-            if self.at_id("import"):
-                self.consume()
-                self.expect_id()
-                if self.at_punc(";"):
-                    self.consume()
+            if self.at_id("inm"):
+                imports.append(self.parse_inm())
                 continue
+            if self.at_id("import"):
+                t = self.peek()
+                raise HomoError("import 已改名为 inm；现在写成 inm 模块名（引用 .homo 文件）",
+                                t.line if t else 1)
             if self.at_punc(";"):
                 self.consume()
                 continue
             if self.at_id(CLASS_KW):
-                classes.append(self.parse_class())
+                if self.declaration_mode:
+                    class_decls.append(self.parse_class_declaration())
+                else:
+                    classes.append(self.parse_class())
                 continue
             if self.at_id(DECL):
-                globals_.append(self.parse_decl())
+                if self._looks_like_function_decl():
+                    if not self.declaration_mode:
+                        t = self.peek()
+                        raise HomoError(
+                            "函数声明只能写在 .inm 文件里；.homo 里请写完整实现",
+                            t.line if t else 1,
+                        )
+                    declarations.append(self.parse_declared_function())
+                elif self.declaration_mode:
+                    global_decls.append(self.parse_global_declaration())
+                else:
+                    globals_.append(self.parse_decl())
+                continue
+            t = self.peek()
+            nxt = self.peek(1)
+            nxt2 = self.peek(2)
+            if (t is not None and t.kind == "id"
+                    and nxt is not None and nxt.kind == "punc" and nxt.text == ":"
+                    and nxt2 is not None and nxt2.kind == "punc" and nxt2.text == ":"):
+                raise HomoError(
+                    "类外实现「类名::成员」已删除；请写完整的 类 类名 { ... } 定义",
+                    t.line,
+                )
+            if t is not None and t.kind == "id" and nxt is not None and nxt.kind == "punc" and nxt.text == "(":
+                if self.declaration_mode:
+                    if self._old_function_declaration_ahead():
+                        raise HomoError(
+                            "旧的函数声明写法已删除；请在 .inm 里写"
+                            "「你是一个一个一个 函数名（参数）哼哼哼啊啊啊啊啊」",
+                            t.line,
+                        )
+                    raise HomoError(
+                        ".inm 里只能写声明，函数实现请写到 .homo 文件里",
+                        t.line,
+                    )
+                funcs.append(self.parse_top_function())
+            else:
+                raise HomoError(
+                    "顶层只能写 import、变量声明、类声明/定义、函数声明/定义",
+                    t.line if t else 1,
+                )
+        return Program(functions=funcs, classes=classes, globals=globals_,
+                       imports=imports, declarations=declarations,
+                       global_decls=global_decls, class_decls=class_decls)
+
+    def parse_global_declaration(self) -> Decl:
+        """解析 .inm 全局变量声明：你是一个一个一个 名字 哼哼哼啊啊啊啊啊"""
+        head = self.expect_id(DECL)
+        name = self.expect_id()
+        check_variable_name(name.text, name.line)
+        if self.at_punc("["):
+            raise HomoError(
+                f".inm 里的变量「{name.text}」只写名字；数组长度和初值请在 .homo 里定义",
+                name.line,
+            )
+        if self.at_id(ASSIGN):
+            raise HomoError(
+                f".inm 里的变量「{name.text}」不能给初值；请在 .homo 里定义",
+                name.line,
+            )
+        if not self.at_id(DECL_END):
+            raise HomoError(
+                f"变量声明「{name.text}」末尾要写「{DECL_END}」",
+                name.line,
+            )
+        self.consume()
+        if self.at_punc(";"):
+            self.consume()
+        return Decl(name.text, None, head.line)
+
+    def parse_class_declaration(self) -> ClassDecl:
+        """解析 .inm 类声明：类 名字 哼哼哼啊啊啊啊啊 或 类 名字 { 声明... }"""
+        head = self.expect_id(CLASS_KW)
+        name = self.expect_id()
+        if self.at_id(DECL_END):
+            self.consume()
+            return ClassDecl(name.text, [], [], head.line)
+        self.expect_punc("{")
+        fields: list[Decl] = []
+        methods: list[FuncDecl] = []
+        private = False
+        while not self.at_punc("}"):
+            if self.at_end():
+                raise HomoError("类声明没有闭合（缺少 }）", self.last_line())
+            if self.at_punc(";"):
+                self.consume()
+                continue
+            if self.at_id(PUBLIC_KW):
+                self.consume()
+                private = False
+                continue
+            if self.at_id(PRIVATE_KW):
+                self.consume()
+                private = True
+                continue
+            if self.at_id(DECL):
+                if self._looks_like_function_decl():
+                    method = self.parse_declared_function()
+                    method.private = private
+                    methods.append(method)
+                else:
+                    fld = self.parse_global_declaration()
+                    fld.private = private
+                    fields.append(fld)
                 continue
             t = self.peek()
             nxt = self.peek(1)
             if t is not None and t.kind == "id" and nxt is not None and nxt.kind == "punc" and nxt.text == "(":
-                funcs.append(self.parse_function())
-            else:
                 raise HomoError(
-                    "顶层只能写 import、全局变量声明、类定义或函数定义（函数名后要跟括号）",
-                    t.line if t else 1,
+                    "类声明里的方法要写成"
+                    "「你是一个一个一个 方法（参数）哼哼哼啊啊啊啊啊」",
+                    t.line,
                 )
-        if not funcs:
-            raise HomoError("程序里至少要有一个函数（入口请命名为「会员制餐厅」）", 1)
-        return Program(funcs, classes, globals_)
+            raise HomoError("类声明里只能写字段声明或方法声明",
+                            t.line if t else self.last_line())
+        self.expect_punc("}")
+        return ClassDecl(name.text, fields, methods, head.line)
+
+    def parse_inm(self) -> ImportDecl:
+        """inm 模块名 / inm 类名 from 类定义 / inm "路径.homo"。"""
+        head = self.expect_id("inm")
+        first = self.peek()
+        if first is None:
+            raise HomoError("inm 后面要写要引用的 .homo 文件", head.line)
+        second = self.peek(1)
+        if (first.kind == "id" and second is not None
+                and second.kind == "id" and second.text == "from"):
+            class_name = self.consume().text
+            self.consume()  # from
+            target = self.parse_inm_target()
+            if self.at_punc(";"):
+                self.consume()
+            return ImportDecl(target, head.line, class_name)
+        target = self.parse_inm_target(first)
+        if self.at_punc(";"):
+            self.consume()
+        return ImportDecl(target, head.line)
+
+    def parse_inm_target(self, first: Optional[Token] = None) -> str:
+        target = ""
+        if first is None:
+            first = self.peek()
+        if first is None:
+            raise HomoError("inm 后面要写要引用的 .homo 文件", self.last_line())
+        if first.kind == "str":
+            self.consume()
+            target = string_inner(first.text).strip()
+        elif first.kind == "id" or (first.kind == "punc" and first.text in (".", "/")):
+            line = first.line
+            parts: list[str] = []
+            expect_component = True
+            while True:
+                cur = self.peek()
+                if cur is None or cur.line != line:
+                    break
+                if expect_component:
+                    if cur.kind == "id":
+                        parts.append(cur.text)
+                        self.consume()
+                        expect_component = False
+                    elif cur.kind == "punc" and cur.text in (".", "/"):
+                        parts.append(cur.text)
+                        self.consume()
+                    else:
+                        break
+                else:
+                    if cur.kind == "punc" and cur.text in (".", "/"):
+                        parts.append(cur.text)
+                        self.consume()
+                        expect_component = True
+                    else:
+                        break
+            target = "".join(parts)
+        else:
+            raise HomoError("inm 后面要写 .homo 文件名或只导入类时的类名", first.line)
+        if not target:
+            raise HomoError("inm 的文件名不能为空", first.line)
+        return target
 
     def parse_class(self) -> Class:
         head = self.expect_id(CLASS_KW)
@@ -578,6 +790,71 @@ class Parser:
                 break
         self.expect_punc(")")
         return params
+
+    def _old_function_declaration_ahead(self) -> bool:
+        """检测 .inm 里是否用了已删除的 name(参数); 写法。"""
+        head = self.peek()
+        if head is None or head.kind != "id":
+            return False
+        if self.peek(1) is None or self.peek(1).kind != "punc" or self.peek(1).text != "(":
+            return False
+        depth = 0
+        i = self.pos + 1
+        while i < len(self.tokens):
+            tok = self.tokens[i]
+            if tok.kind == "punc" and tok.text == "(":
+                depth += 1
+            elif tok.kind == "punc" and tok.text == ")":
+                depth -= 1
+                if depth == 0:
+                    nxt = self.tokens[i + 1] if i + 1 < len(self.tokens) else None
+                    return nxt is not None and nxt.kind == "punc" and nxt.text == ";"
+            i += 1
+        return False
+
+    def _looks_like_function_decl(self) -> bool:
+        """判断「你是一个一个一个 名字(...)」是函数声明还是变量声明。"""
+        if not self.at_id(DECL):
+            return False
+        name = self.peek(1)
+        paren = self.peek(2)
+        return (name is not None and name.kind == "id"
+                and paren is not None and paren.kind == "punc"
+                and paren.text == "(")
+
+    def parse_declared_function(self) -> FuncDecl:
+        """解析：你是一个一个一个 函数名（参数）哼哼哼啊啊啊啊啊"""
+        self.expect_id(DECL)
+        name_tok = self.expect_id()
+        params = self.parse_params()
+        if self.at_punc("{"):
+            raise HomoError(
+                f"带函数体的定义请写成「{name_tok.text}(参数){{...}}」，"
+                f"不要加「{DECL}」前缀",
+                name_tok.line,
+            )
+        if not self.at_id(DECL_END):
+            raise HomoError(
+                f"函数声明「{name_tok.text}」末尾要写「{DECL_END}」",
+                name_tok.line,
+            )
+        self.consume()
+        if self.at_punc(";"):
+            self.consume()
+        return FuncDecl(name_tok.text, params, name_tok.line)
+
+    def parse_top_function(self) -> Func:
+        """顶层函数定义：name(参数){...}。旧的 name(参数); 声明写法已删除。"""
+        name_tok = self.expect_id()
+        params = self.parse_params()
+        if self.at_punc(";"):
+            raise HomoError(
+                "旧的函数声明写法已删除；请在 .inm 里写"
+                "「你是一个一个一个 函数名（参数）哼哼哼啊啊啊啊啊」",
+                name_tok.line,
+            )
+        body = self.parse_block()
+        return Func(name_tok.text, params, body, name_tok.line)
 
     def parse_function(self) -> Func:
         name_tok = self.expect_id()
@@ -1017,9 +1294,16 @@ def split_template(raw: str, line: int) -> list[tuple[str, object]]:
             sub = Parser(tokens)
             if not tokens:
                 raise HomoError("模板里的「{}」不能为空", line)
-            expr = sub.parse_expr()
+            try:
+                expr = sub.parse_expr()
+            except HomoError as exc:
+                exc.line = line
+                raise
             if not sub.at_end():
                 raise HomoError("模板里的表达式无法解析", line)
+            # 模板表达式是在子串上重新分词的，行号从 1 开始；
+            # 统一改回整条语句所在的行，运行期报错才能指对位置。
+            _shift_ast_lines(expr, line - 1)
             parts.append(("expr", expr))
             i = j + 1
             continue
@@ -1179,6 +1463,12 @@ def param_arity(params: list[Param]) -> tuple[int, Optional[int]]:
     return required, len(params)
 
 
+def function_signature(params: list[Param]) -> tuple[tuple[int, Optional[int]], Optional[int]]:
+    """声明/定义匹配用的简化签名：(必填/最大参数个数, 可变参数位置)。"""
+    variadic = next((i for i, p in enumerate(params) if p.variadic), None)
+    return param_arity(params), variadic
+
+
 def arity_message(kind: str, name: str, params: list[Param], given: int) -> str:
     required, maximum = param_arity(params)
     if maximum is None or given < required:
@@ -1221,12 +1511,107 @@ class Scopes:
         return any(name in frame for frame in self.frames)
 
 
+def reject_duplicate_declarations(program: Program) -> None:
+    """.inm 声明检查：同一个 .inm 只加载一次；不同 .inm 的重复声明报错。"""
+    seen_globals: set[str] = set()
+    for d in program.global_decls:
+        if d.name in seen_globals:
+            raise HomoError(f"变量「{d.name}」重复声明", d.line)
+        seen_globals.add(d.name)
+
+    seen_funcs: set[tuple[str, tuple]] = set()
+    for d in program.declarations:
+        key = (d.name, function_signature(d.params))
+        if key in seen_funcs:
+            raise HomoError(f"函数「{d.name}」重复声明", d.line)
+        seen_funcs.add(key)
+
+    seen_classes: set[str] = set()
+    for cd in program.class_decls:
+        if cd.name in seen_classes:
+            raise HomoError(f"类「{cd.name}」重复声明", cd.line)
+        seen_classes.add(cd.name)
+
+
 def check_names(program: Program) -> None:
-    function_names = {f.name for f in program.functions}
+    reject_duplicate_declarations(program)
+    seen_functions: set[str] = set()
+    for f in program.functions:
+        if f.name in seen_functions:
+            raise HomoError(f"函数「{f.name}」重复定义", f.line)
+        seen_functions.add(f.name)
+    seen_classes: set[str] = set()
+    for c in program.classes:
+        if c.name in seen_classes:
+            raise HomoError(f"类「{c.name}」重复定义", c.line)
+        seen_classes.add(c.name)
     functions_by_name = {f.name: f for f in program.functions}
+    declarations_by_name: dict[str, list[FuncDecl]] = {}
+    for d in program.declarations:
+        if d.name in BUILTIN_CALLS:
+            raise HomoError(f"「{d.name}」是内置函数名，不能用作函数名", d.line)
+        declarations_by_name.setdefault(d.name, []).append(d)
+    for name, decls in declarations_by_name.items():
+        signature = function_signature(decls[0].params)
+        for d in decls[1:]:
+            if function_signature(d.params) != signature:
+                raise HomoError(f"函数「{name}」的声明互相冲突", d.line)
+        definition = functions_by_name.get(name)
+        if definition is None:
+            raise HomoError(
+                f"函数「{name}」只有声明，没有定义；请在 .homo 中给出实现，或链接实现它的 .homo 文件",
+                decls[0].line,
+            )
+        if function_signature(definition.params) != signature:
+            raise HomoError(f"函数「{name}」的声明和定义参数不匹配", decls[0].line)
+    function_names = set(functions_by_name) | set(declarations_by_name)
     class_names = {c.name for c in program.classes}
     classes_by_name = {c.name: c for c in program.classes}
-    all_global_names = {g.name for g in program.globals}
+
+    # .inm 类声明必须能在 .homo 里找到完整类定义，且声明的成员要存在。
+    class_decls_by_name: dict[str, list[ClassDecl]] = {}
+    for cd in program.class_decls:
+        class_decls_by_name.setdefault(cd.name, []).append(cd)
+    for name, decls in class_decls_by_name.items():
+        definition = classes_by_name.get(name)
+        if definition is None:
+            raise HomoError(
+                f"类「{name}」只有声明，没有定义；请在 .homo 中给出实现",
+                decls[0].line,
+            )
+        fields_by_name = {fld.name: fld for fld in definition.fields}
+        methods_by_signature = {(m.name, function_signature(m.params)): m
+                                for m in definition.methods}
+        for cd in decls:
+            for fld in cd.fields:
+                target = fields_by_name.get(fld.name)
+                if target is None:
+                    raise HomoError(
+                        f"类「{name}」声明了字段「{fld.name}」，但 .homo 的类实现里没有",
+                        fld.line,
+                    )
+                # .inm 声明的可见性优先于 .homo 里的写法。
+                target.private = fld.private
+            for m in cd.methods:
+                target = methods_by_signature.get((m.name, function_signature(m.params)))
+                if target is None:
+                    raise HomoError(
+                        f"类「{name}」声明了方法「{m.name}」，但 .homo 里没有匹配的实现",
+                        m.line,
+                    )
+                target.private = m.private
+
+    # .inm 全局变量声明必须有 .homo 里的定义。
+    global_defs_by_name = {g.name: g for g in program.globals}
+    for d in program.global_decls:
+        if d.name not in global_defs_by_name:
+            raise HomoError(
+                f"变量「{d.name}」只有声明，没有定义；请在 .homo 中定义",
+                d.line,
+            )
+
+    all_global_names = ({g.name for g in program.globals}
+                        | {d.name for d in program.global_decls})
     for f in program.functions:
         if f.name in BUILTIN_CALLS:
             raise HomoError(f"「{f.name}」是内置函数名，不能用作函数名", f.line)
@@ -1442,9 +1827,10 @@ def check_names(program: Program) -> None:
 # C++ 代码生成
 # --------------------------------------------------------------------------
 class CEmitter:
-    def __init__(self, program: Program):
+    def __init__(self, program: Program, source_map: Optional[SourceMap] = None):
         self.program = program
-        self.lines: list[tuple[str, int]] = []   # (代码行, homo 源码行)
+        self.source_map = source_map
+        self.lines: list[tuple[str, int]] = []   # (代码行, homo 全局行号)
         self.indent = 0
         self.loop_counter = 0
         # 块级作用域：名字 -> "scalar" / "array" / "unknown"
@@ -1497,8 +1883,47 @@ class CEmitter:
     def blank(self) -> None:
         self.lines.append(("", 0))
 
+    def emit_location_table(self) -> None:
+        """生成运行期位置表：全局行号 -> (文件名, 文件内行号)。
+
+        homo_runtime_error 通过 homo_lookup_location 把生成代码里的全局行号
+        换回用户真正看到的文件和行号，多文件时也不会指错文件。
+        """
+        rows = self.source_map.rows() if self.source_map else []
+        self.add("homo_source_location homo_lookup_location(long long line) {", 0)
+        self.indent += 1
+        if rows:
+            self.add("static const struct _homo_row { long long start; long long end; "
+                     "const char* file; } _homo_rows[] = {", 0)
+            self.indent += 1
+            for start, end, display in rows:
+                self.add("{%d, %d, %s}," % (start, end, cpp_quote(display)), 0)
+            self.add("{0, 0, \"\"},", 0)
+            self.indent -= 1
+            self.add("};", 0)
+            self.add("for (const auto& row : _homo_rows) {", 0)
+            self.indent += 1
+            self.add("if (line >= row.start && line < row.end) "
+                     "return {row.file, line - row.start + 1};", 0)
+            self.indent -= 1
+            self.add("}", 0)
+        self.add('return {"", line};', 0)
+        self.indent -= 1
+        self.add("}", 0)
+
     def emit(self) -> tuple[str, list[int]]:
+        # Windows 控制台默认不是 UTF-8；把输入/输出代码页切成 UTF-8，
+        # 直接运行生成的 exe 时中文才是可读的（走管道时不受影响）。
+        # 这里手写 kernel32 声明，避免把 windows.h 的大量宏带进来和用户标识符冲突。
+        self.add("#ifdef _WIN32", 0)
+        self.add('extern "C" __declspec(dllimport) int __stdcall '
+                 'SetConsoleOutputCP(unsigned int);', 0)
+        self.add('extern "C" __declspec(dllimport) int __stdcall '
+                 'SetConsoleCP(unsigned int);', 0)
+        self.add("#endif", 0)
         self.add('#include "homo_runtime.hpp"', 0)
+        self.add("", 0)
+        self.emit_location_table()
         self.blank()
         if self.program.functions:
             for f in self.program.functions:
@@ -1524,6 +1949,8 @@ class CEmitter:
         # 输出走管道时默认全缓冲，提示语会迟迟不出现；改成行缓冲以便交互。
         # 注意：Windows 的 setvbuf 不支持 _IOLBF（等同全缓冲），直接关掉缓冲。
         self.add("#ifdef _WIN32", 0)
+        self.add("SetConsoleOutputCP(65001u);", 0)
+        self.add("SetConsoleCP(65001u);", 0)
         self.add("std::setvbuf(stdout, nullptr, _IONBF, 0);", 0)
         self.add("#else", 0)
         self.add("std::setvbuf(stdout, nullptr, _IOLBF, 0);", 0)
@@ -1542,9 +1969,12 @@ class CEmitter:
         return text, linemap
 
     def pick_entry(self) -> Func:
-        names = [f.name for f in self.program.functions]
-        entry = "会员制餐厅" if "会员制餐厅" in names else names[0]
-        f = next(x for x in self.program.functions if x.name == entry)
+        if self.program.entry is not None:
+            f = self.program.entry
+        else:
+            names = [f.name for f in self.program.functions]
+            entry = "会员制餐厅" if "会员制餐厅" in names else names[0]
+            f = next(x for x in self.program.functions if x.name == entry)
         if f.params:
             raise HomoError("入口函数不能带参数", f.line)
         return f
@@ -2157,42 +2587,642 @@ def cxx_fn(name: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# 多文件：import .inm
+# --------------------------------------------------------------------------
+def resource_path(name: str) -> str:
+    """资源文件路径；PyInstaller 打包后从临时解包目录读取。"""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
+
+RUNTIME_PATH = resource_path("homo_runtime.hpp")
+
+
+@dataclass
+class SourceUnit:
+    path: Optional[str]       # 绝对路径；内存源码为 None
+    display: str              # 展示用路径（相对项目根目录）
+    source: str
+    start_line: int           # 在所有模块拼起来后的全局起始行
+    line_count: int
+
+
+class SourceMap:
+    """把生成的 C++ 行号 / 全局行号换算回具体文件和文件内行号。"""
+
+    def __init__(self, root_dir: Optional[str] = None):
+        self.root_dir = os.path.realpath(root_dir) if root_dir else None
+        self.units: list[SourceUnit] = []
+        self.next_line = 1
+
+    def display_path(self, path: Optional[str]) -> str:
+        if not path:
+            return "<内存>"
+        path = os.path.realpath(path)
+        if self.root_dir:
+            try:
+                rel = os.path.relpath(path, self.root_dir)
+            except ValueError:
+                rel = path
+            if rel != ".." and not rel.startswith(".." + os.sep) and not os.path.isabs(rel):
+                return rel.replace(os.sep, "/")
+        return path.replace(os.sep, "/")
+
+    def add(self, path: Optional[str], source: str) -> SourceUnit:
+        real = os.path.realpath(path) if path else None
+        unit = SourceUnit(
+            path=real,
+            display=self.display_path(real),
+            source=source,
+            start_line=self.next_line,
+            line_count=source.count("\n") + 1,
+        )
+        self.units.append(unit)
+        self.next_line += unit.line_count
+        return unit
+
+    def resolve(self, global_line: int) -> tuple[Optional[str], int]:
+        if not global_line or global_line <= 0:
+            return None, 0
+        for unit in reversed(self.units):
+            if unit.start_line <= global_line < unit.start_line + unit.line_count:
+                return unit.display, global_line - unit.start_line + 1
+        return None, global_line
+
+    def resolve_path(self, global_line: int) -> tuple[Optional[str], Optional[str], int]:
+        display, line = self.resolve(global_line)
+        for unit in self.units:
+            if unit.display == display:
+                return unit.path, display, line
+        return None, display, line
+
+    def path_for_display(self, display: str) -> Optional[str]:
+        wanted = display.replace("\\", "/")
+        for unit in self.units:
+            if unit.display == wanted:
+                return unit.path
+        return None
+
+    def rows(self) -> list[tuple[int, int, str]]:
+        """(全局起始行, 全局结束行（不含）, 展示路径)"""
+        return [(u.start_line, u.start_line + u.line_count, u.display) for u in self.units]
+
+
+def _shift_ast_lines(node: object, delta: int) -> None:
+    """把模块自己的局部行号整体平移到全局行号。"""
+    if not delta or node is None:
+        return
+    if isinstance(node, list):
+        for item in node:
+            _shift_ast_lines(item, delta)
+        return
+    if isinstance(node, tuple):
+        for item in node:
+            _shift_ast_lines(item, delta)
+        return
+    if isinstance(node, dict):
+        for item in node.values():
+            _shift_ast_lines(item, delta)
+        return
+    if not dataclasses.is_dataclass(node):
+        return
+    for f in dataclasses.fields(node):
+        value = getattr(node, f.name)
+        if f.name == "line" and isinstance(value, int):
+            if value > 0:
+                setattr(node, f.name, value + delta)
+        else:
+            _shift_ast_lines(value, delta)
+
+
+def format_error(e: HomoError) -> str:
+    """统一的人读错误格式：文件:行: 信息。"""
+    sm = e.source_map
+    file, line = e.file, e.line
+    if sm is not None and e.line:
+        mapped_file, mapped_line = sm.resolve(e.line)
+        if mapped_file:
+            file, line = mapped_file, mapped_line
+    if file:
+        where = f"{file}:{line}" if line else file
+        return f"{where}: {e.msg}"
+    if line:
+        return f"第 {line} 行：{e.msg}"
+    return e.msg
+
+
+def error_diagnostic(e: HomoError) -> dict:
+    sm = e.source_map
+    path, file, line = e.path, e.file, e.line
+    if sm is not None and e.line:
+        mapped_path, mapped_file, mapped_line = sm.resolve_path(e.line)
+        if mapped_file:
+            path, file, line = mapped_path, mapped_file, mapped_line
+    return {
+        "severity": "错误",
+        "file": file or "",
+        "path": path or "",
+        "line": line or 0,
+        "column": 0,
+        "message": e.msg,
+    }
+
+
+
+def _normalize_import_target(target: str) -> str:
+    t = target.strip()
+    if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"“”‘’'":
+        t = t[1:-1]
+    return t.replace("\\", "/")
+
+
+def _import_candidates(target: str, importer: Optional[str],
+                       include_dirs: list[str],
+                       base_dir: Optional[str] = None) -> list[str]:
+    if target.lower().endswith(".homo"):
+        names = [target]
+    elif target.lower().endswith(".inm"):
+        names = []
+    else:
+        names = [target + ".homo", target]
+    bases = [os.path.dirname(importer) if importer else (base_dir or os.getcwd())]
+    bases.extend(include_dirs)
+    out: list[str] = []
+    seen: set[str] = set()
+    for base in bases:
+        for name in names:
+            cand = os.path.normpath(os.path.join(base, name))
+            if cand not in seen:
+                seen.add(cand)
+                out.append(cand)
+    return out
+
+
+def _find_import(target: str, importer: Optional[str], include_dirs: list[str],
+                 line: int, sm: SourceMap,
+                 base_dir: Optional[str] = None) -> Optional[str]:
+    if target.lower().endswith(".inm"):
+        err = HomoError(
+            "不再支持 .inm 文件；inm 只能引用 .homo 文件",
+            line, file=sm.display_path(importer) if importer else None,
+            path=importer,
+        )
+        err.source_map = sm
+        raise err
+    candidates = _import_candidates(target, importer, include_dirs, base_dir)
+    for cand in candidates:
+        if os.path.isfile(cand):
+            return os.path.realpath(cand)
+    tried = "、".join(sm.display_path(c) for c in candidates[:4])
+    more = " 等" if len(candidates) > 4 else ""
+    err = HomoError(
+        f"找不到 inm「{target}」；找过：{tried}{more}",
+        line, file=sm.display_path(importer) if importer else None,
+        path=importer,
+    )
+    err.source_map = sm
+    raise err
+
+
+def load_program(root_path: Optional[str], root_source: Optional[str] = None,
+                 overlay: Optional[dict[str, str]] = None,
+                 include_dirs: Optional[list[str]] = None,
+                 base_dir: Optional[str] = None,
+                 require_function: bool = True) -> tuple[Program, SourceMap, list[SourceUnit]]:
+    """读取主文件及其 import 的 .inm，按依赖顺序合并成一个程序。
+
+    overlay 用「绝对路径 -> 源码」覆盖磁盘内容，供桌面编辑器编译未保存的缓冲区。
+    """
+    root_path = os.path.abspath(root_path) if root_path else None
+    root_dir = os.path.realpath(
+        os.path.dirname(root_path) if root_path
+        else base_dir if base_dir else os.getcwd()
+    )
+    sm = SourceMap(root_dir)
+    include_dirs = [os.path.abspath(d) for d in (include_dirs or [])]
+    overlay = {os.path.realpath(k): v for k, v in (overlay or {}).items()}
+
+    def read_source(path: str) -> str:
+        real = os.path.realpath(path)
+        if real in overlay:
+            return overlay[real]
+        try:
+            with open(real, "rb") as f:
+                data = f.read()
+        except OSError as exc:
+            err = HomoError(f"读取模块失败：{exc}", 0,
+                            file=sm.display_path(real), path=real)
+            err.source_map = sm
+            raise err from exc
+        try:
+            return data.decode("utf-8-sig")
+        except UnicodeDecodeError as exc:
+            err = HomoError(f"文件不是 UTF-8 编码：{exc}", 0,
+                            file=sm.display_path(real), path=real)
+            err.source_map = sm
+            raise err from exc
+
+    def parse_unit(path: Optional[str], source: str) -> tuple[Program, SourceUnit]:
+        unit = sm.add(path, source)
+        declaration_mode = bool(path and path.lower().endswith(".inm"))
+        try:
+            program = Parser(tokenize(source), declaration_mode=declaration_mode).parse_program()
+        except HomoError as e:
+            if e.line:
+                e.line += unit.start_line - 1
+            e.file = unit.display
+            e.path = unit.path
+            e.source_map = sm
+            raise
+        _shift_ast_lines(program, unit.start_line - 1)
+        return program, unit
+
+    modules: list[tuple[Program, Optional[str]]] = []
+    parsed_cache: dict[str, tuple[Program, SourceUnit]] = {}
+    load_state: dict[str, Optional[set[str]]] = {}  # None=整文件，set=已选类
+    imports_loaded: set[str] = set()
+    active: list[str] = []
+    root_program: Optional[Program] = None
+    root_unit: Optional[SourceUnit] = None
+
+    def cached_parse(real: str, source_override: Optional[str] = None):
+        if real in parsed_cache:
+            return parsed_cache[real]
+        source = source_override if source_override is not None else read_source(real)
+        program, unit = parse_unit(real, source)
+        parsed_cache[real] = (program, unit)
+        return program, unit
+
+    def filter_class(program: Program, class_name: str,
+                     importer: Optional[str], line: int) -> Program:
+        classes = [c for c in program.classes if c.name == class_name]
+        if not classes:
+            err = HomoError(
+                f"文件里没有类「{class_name}」",
+                line, file=sm.display_path(importer) if importer else None,
+                path=importer,
+            )
+            err.source_map = sm
+            raise err
+        return Program(functions=[], classes=classes, globals=[], imports=[],
+                       declarations=[], global_decls=[], class_decls=[])
+
+    def ensure_imports(program: Program, real: str) -> None:
+        if real in imports_loaded:
+            return
+        imports_loaded.add(real)
+        load_imports(program, real)
+
+    def load(path: str, *, is_root: bool = False,
+             source_override: Optional[str] = None,
+             selected_class: Optional[str] = None,
+             importer: Optional[str] = None,
+             import_line: int = 0) -> None:
+        nonlocal root_program, root_unit
+        real = os.path.realpath(path)
+        state = load_state.get(real, "unloaded")
+        if selected_class is None:
+            if state is None:
+                return
+            if state != "unloaded":
+                err = HomoError(
+                    "同一个文件不能同时整体 inm 和只 inm 某个类",
+                    import_line, file=sm.display_path(importer) if importer else None,
+                    path=importer,
+                )
+                err.source_map = sm
+                raise err
+            program, unit = cached_parse(real, source_override)
+            if is_root:
+                root_program, root_unit = program, unit
+            load_state[real] = None
+            active.append(real)
+            try:
+                ensure_imports(program, real)
+            finally:
+                active.pop()
+            modules.append((program, real))
+            return
+
+        # 只导入某个类
+        if state is None:
+            return
+        if state == "unloaded":
+            state = set()
+            load_state[real] = state
+        assert isinstance(state, set)
+        if selected_class in state:
+            return
+        program, unit = cached_parse(real, source_override)
+        state.add(selected_class)
+        # 只导入这个类，不加载该文件顶部的 inm 依赖；整文件 inm 时才加载。
+        modules.append((filter_class(program, selected_class, importer, import_line),
+                        real))
+
+    def load_imports(program: Program, importer: Optional[str],
+                     import_base: Optional[str] = None) -> None:
+        for imp in program.imports:
+            target = _normalize_import_target(imp.target)
+            dep = _find_import(target, importer, include_dirs, imp.line, sm, import_base)
+            if dep is None:
+                continue
+            dep_real = os.path.realpath(dep)
+            if dep_real in active:
+                idx = active.index(dep_real)
+                chain = active[idx:] + [dep_real]
+                err = HomoError(
+                    "检测到循环 inm：" + " → ".join(sm.display_path(p) for p in chain),
+                    imp.line, file=sm.display_path(importer) if importer else None,
+                    path=importer,
+                )
+                err.source_map = sm
+                raise err
+            load(dep, selected_class=imp.selected_class,
+                 importer=importer, import_line=imp.line)
+
+    if root_path:
+        load(root_path, is_root=True, source_override=root_source)
+    else:
+        root_program, root_unit = parse_unit(None, root_source or "")
+        active.append("<memory>")
+        try:
+            load_imports(root_program, None, root_dir)
+        finally:
+            active.pop()
+        modules.append((root_program, None))
+
+    merged = Program(functions=[], classes=[], globals=[], imports=[],
+                     declarations=[], global_decls=[], class_decls=[])
+    for module, _module_path in modules:
+        merged.functions.extend(module.functions)
+        merged.classes.extend(module.classes)
+        merged.globals.extend(module.globals)
+        merged.declarations.extend(module.declarations)
+        merged.global_decls.extend(module.global_decls)
+        merged.class_decls.extend(module.class_decls)
+
+    if require_function:
+        # 入口只从主程序 .homo 里找「会员制餐厅」，不退回其他 .homo。
+        main_functions = root_program.functions if root_program else []
+        entry = next((f for f in main_functions if f.name == "会员制餐厅"), None)
+        if entry is None:
+            line = root_unit.start_line if root_unit else 1
+            err = HomoError(
+                "没有主函数入口：主程序 .homo 里必须定义「会员制餐厅」",
+                line, file=root_unit.display if root_unit else None,
+                path=root_unit.path if root_unit else None,
+            )
+            err.source_map = sm
+            raise err
+        merged.entry = entry
+    if not merged.functions:
+        return merged, sm, list(sm.units)
+    return merged, sm, list(sm.units)
+
+
+@dataclass
+class Compiled:
+    cpp: str
+    types: list[dict]
+    linemap: list[int]
+    source_map: SourceMap
+    program: Program
+    units: list[SourceUnit]
+
+
+def compile_source(source: str, *, path: Optional[str] = None,
+                   overlay: Optional[dict[str, str]] = None,
+                   include_dirs: Optional[list[str]] = None,
+                   base_dir: Optional[str] = None) -> Compiled:
+    program, sm, units = load_program(path, source, overlay, include_dirs, base_dir)
+    try:
+        check_names(program)
+        types = analyze_types(program)
+        cpp, linemap = CEmitter(program, sm).emit()
+    except HomoError as e:
+        e.source_map = e.source_map or sm
+        if e.path is None and e.line:
+            path, display, _ = sm.resolve_path(e.line)
+            e.path = path
+            e.file = e.file or display
+        raise
+    return Compiled(cpp, types, linemap, sm, program, units)
+
+
+def check_source(source: str, *, path: Optional[str] = None,
+                 overlay: Optional[dict[str, str]] = None,
+                 include_dirs: Optional[list[str]] = None,
+                 base_dir: Optional[str] = None,
+                 require_function: bool = False) -> tuple[Program, SourceMap, list[SourceUnit]]:
+    """编辑器的实时检查：解析、import、名字和作用检查，不生成/编译 C++。
+
+    默认不要求入口函数，因此可以直接检查 .inm 库文件。
+    """
+    program, sm, units = load_program(path, source, overlay, include_dirs,
+                                      base_dir, require_function=require_function)
+    try:
+        check_names(program)
+        analyze_types(program)
+    except HomoError as e:
+        e.source_map = e.source_map or sm
+        if e.path is None and e.line:
+            resolved_path, display, _ = sm.resolve_path(e.line)
+            e.path = resolved_path
+            e.file = e.file or display
+        raise
+    return program, sm, units
+
+
+def transpile(source: str, path: Optional[str] = None, *,
+              overlay: Optional[dict[str, str]] = None,
+              include_dirs: Optional[list[str]] = None,
+              base_dir: Optional[str] = None) -> tuple[str, list[dict], list[int]]:
+    compiled = compile_source(source, path=path, overlay=overlay,
+                              include_dirs=include_dirs, base_dir=base_dir)
+    return compiled.cpp, compiled.types, compiled.linemap
+
+
+def lint(source: str, path: Optional[str] = None, *,
+         overlay: Optional[dict[str, str]] = None,
+         include_dirs: Optional[list[str]] = None,
+         base_dir: Optional[str] = None) -> None:
+    """快速检查：词法、语法、inm、未定义名字、代码生成约束；不调用 C++ 编译器。"""
+    compile_source(source, path=path, overlay=overlay, include_dirs=include_dirs,
+                   base_dir=base_dir)
+
+
+# --------------------------------------------------------------------------
+# C++ 编译器查找
+# --------------------------------------------------------------------------
+@dataclass
+class Compiler:
+    path: str
+    kind: str = "gnu"          # gnu / msvc
+    vcvars: Optional[str] = None
+    label: str = ""
+
+
+def _extra_compiler_dirs() -> list[str]:
+    if os.name == "nt":
+        home = os.path.expanduser("~")
+        return [
+            r"C:\msys64\mingw64\bin", r"C:\msys64\ucrt64\bin",
+            r"C:\mingw64\bin", r"C:\mingw32\bin",
+            r"C:\Program Files\LLVM\bin",
+            os.path.join(home, r"scoop\apps\mingw\current\bin"),
+            os.path.join(home, r"scoop\apps\llvm\current\bin"),
+        ]
+    return ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+
+
+def _find_msvc() -> Optional[Compiler]:
+    if os.name != "nt":
+        return None
+    vswhere = os.path.join(
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        "Microsoft Visual Studio", "Installer", "vswhere.exe",
+    )
+    if not os.path.isfile(vswhere):
+        return None
+    try:
+        proc = subprocess.run(
+            [vswhere, "-latest", "-products", "*",
+             "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+             "-property", "installationPath"],
+            capture_output=True, text=True, timeout=20,
+            creationflags=_subprocess_flags(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    install = (proc.stdout or "").strip().splitlines()
+    if not install:
+        return None
+    base = install[0].strip()
+    vcvars = os.path.join(base, "VC", "Auxiliary", "Build", "vcvars64.bat")
+    tools = os.path.join(base, "VC", "Tools", "MSVC")
+    try:
+        versions = sorted(os.listdir(tools), reverse=True)
+    except OSError:
+        versions = []
+    for version in versions:
+        cl = os.path.join(tools, version, "bin", "Hostx64", "x64", "cl.exe")
+        if os.path.isfile(cl):
+            return Compiler(cl, "msvc", vcvars if os.path.isfile(vcvars) else None,
+                            f"MSVC（{base}）")
+    return None
+
+
+def find_compiler() -> Compiler:
+    """按 HOMO_CXX、g++、clang++、c++、clang-cl、cl 的顺序查找。"""
+    override = os.environ.get("HOMO_CXX")
+    if override:
+        path = override if os.path.isfile(override) else shutil.which(override)
+        if not path:
+            raise HomoError(f"HOMO_CXX 指定的编译器不存在：{override}", 0)
+        kind = "msvc" if os.path.basename(path).lower() in ("cl.exe", "clang-cl.exe") else "gnu"
+        return Compiler(path, kind, None, override)
+
+    search_path = os.pathsep.join(
+        [p for p in [os.environ.get("PATH", "")] + _extra_compiler_dirs() if p]
+    )
+    for name in ("g++", "clang++", "c++", "clang-cl", "cl"):
+        path = shutil.which(name, path=search_path)
+        if path:
+            kind = "msvc" if os.path.basename(path).lower() in ("cl.exe", "clang-cl.exe") else "gnu"
+            return Compiler(path, kind, None, f"{name}（{path}）")
+    msvc = _find_msvc()
+    if msvc is not None:
+        return msvc
+    raise HomoError(
+        "没有找到 C++ 编译器。请安装支持 C++17 的编译器："
+        "Windows 可安装 MinGW-w64（g++）或 Visual Studio；macOS 可安装 Xcode Command Line Tools（clang++）",
+        0,
+    )
+
+
+def _subprocess_flags() -> int:
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
+
+def _run_cpp_compiler(compiler: Compiler, workdir: str, cpp_path: str, exe: str):
+    flags = _subprocess_flags()
+    if compiler.kind == "msvc":
+        cpp_name = os.path.basename(cpp_path)
+        exe_name = os.path.basename(exe)
+        cline = (f'"{compiler.path}" /nologo /std:c++17 /EHsc /O2 /utf-8 '
+                 f'"{cpp_name}" /Fe:"{exe_name}"')
+        if compiler.vcvars:
+            # 通过 cmd 先加载 VS 环境；命令走 Unicode 命令行，避免批处理编码问题。
+            cmdline = f'call "{compiler.vcvars}" >nul && {cline}'
+            argv = ["cmd.exe", "/d", "/c", cmdline]
+        else:
+            # cl.exe 已在 PATH 上（通常已经进过 VS 环境），直接调用避免 cmd 引号问题。
+            argv = [compiler.path, "/nologo", "/std:c++17", "/EHsc", "/O2", "/utf-8",
+                    cpp_name, f"/Fe:{exe_name}"]
+        encoding = locale.getpreferredencoding(False) or "utf-8"
+        return subprocess.run(
+            argv, cwd=workdir,
+            capture_output=True, text=True, encoding=encoding, errors="replace",
+            timeout=120, creationflags=flags,
+        )
+    args = [compiler.path, "-std=c++17", "-O0", "-o", exe, cpp_path]
+    if os.name == "nt":
+        # MinGW 默认按系统代码页处理源码/字面量；显式锁定 UTF-8，
+        # 中文标识符和字符串在 Windows 上才不会乱码。
+        args[1:1] = ["-finput-charset=UTF-8", "-fexec-charset=UTF-8"]
+    return subprocess.run(
+        args,
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120, creationflags=flags,
+    )
+
+
+# --------------------------------------------------------------------------
 # 编译 / 运行
 # --------------------------------------------------------------------------
-RUNTIME_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "homo_runtime.hpp")
+CPP_DIAG_RE = re.compile(
+    r"^(?P<file>.+?):(?P<line>\d+)(?::(?P<col>\d+))?:\s*"
+    r"(?P<sev>fatal error|error|warning|note|错误|警告|注意)\s*[:：]?\s*(?P<msg>.*)$",
+    re.IGNORECASE,
+)
+SEVERITY_LABELS = {
+    "error": "错误", "fatal error": "错误", "错误": "错误",
+    "warning": "警告", "警告": "警告",
+    "note": "提示", "注意": "提示",
+}
 
 
-def transpile(source: str) -> tuple[str, list[dict], list[int]]:
-    tokens = tokenize(source)
-    program = Parser(tokens).parse_program()
-    check_names(program)
-    types = analyze_types(program)
-    cpp, linemap = CEmitter(program).emit()
-    return cpp, types, linemap
+def rewrite_diagnostics(text: str, linemap: list[int],
+                        source_map: Optional[SourceMap] = None) -> str:
+    text = re.sub(r"[A-Za-z]:[\\/][^\s:]*main\.cpp", "main.cpp", text)
+    text = re.sub(r"\S*[\\/]main\.cpp", "main.cpp", text)
 
+    def location(n: int) -> Optional[tuple[str, int]]:
+        if not (0 < n <= len(linemap)) or not linemap[n - 1]:
+            return None
+        if source_map is None:
+            return None
+        file, line = source_map.resolve(linemap[n - 1])
+        return (file, line) if file else None
 
-def lint(source: str) -> None:
-    """快速检查：词法、语法、未定义名字、代码生成约束；不调用 C++ 编译器。"""
-    transpile(source)
+    def repl_paren(m: re.Match) -> str:
+        loc = location(int(m.group(1)))
+        if loc is None:
+            return m.group(0)
+        col = m.group(2)
+        return f"{loc[0]}:{loc[1]}" + (f":{col}" if col else "")
 
+    text = re.sub(r"main\.cpp\((\d+)(?:,(\d+))?\)", repl_paren, text)
 
-def find_compiler() -> str:
-    for name in ("g++", "clang++", "c++"):
-        path = shutil.which(name)
-        if path:
-            return path
-    raise HomoError("没有找到 C++ 编译器（需要 g++ 或 clang++）", 0)
+    def repl_colon(m: re.Match) -> str:
+        loc = location(int(m.group(1)))
+        if loc is None:
+            return m.group(0)
+        col = m.group(2)
+        return f"{loc[0]}:{loc[1]}" + (f":{col}" if col else "")
 
+    text = re.sub(r"main\.cpp:(\d+)(?::(\d+))?", repl_colon, text)
 
-def rewrite_diagnostics(text: str, linemap: list[int]) -> str:
-    text = re.sub(r"\S*/main\.cpp", "main.cpp", text)
-
-    def repl(m: re.Match) -> str:
-        n = int(m.group(1))
-        homo_line = linemap[n - 1] if 0 < n <= len(linemap) else 0
-        return f"homo 源码第 {homo_line} 行" if homo_line else m.group(0)
-
-    text = re.sub(r"main\.cpp:(\d+)(?::\d+)?", repl, text)
     kept = []
     for line in text.splitlines():
         if re.match(r"^\s*\d+\s*\|", line):      # 生成代码的行号片段
@@ -2205,40 +3235,103 @@ def rewrite_diagnostics(text: str, linemap: list[int]) -> str:
     return "\n".join(kept)
 
 
-def build(source: str, workdir: Optional[str] = None) -> dict:
-    cpp, types, linemap = transpile(source)
+def cpp_diagnostics(text: str, source_map: Optional[SourceMap] = None) -> list[dict]:
+    out: list[dict] = []
+    for raw in text.splitlines():
+        m = CPP_DIAG_RE.match(raw.strip())
+        if not m:
+            continue
+        sev_raw = m.group("sev").lower()
+        severity = SEVERITY_LABELS.get(sev_raw, "错误")
+        file = m.group("file")
+        path = None
+        if source_map is not None:
+            path = source_map.path_for_display(file)
+        out.append({
+            "severity": severity,
+            "file": file,
+            "path": path or "",
+            "line": int(m.group("line")),
+            "column": int(m.group("col") or 0),
+            "message": m.group("msg").strip(),
+        })
+    return out
+
+
+def build(source=None, workdir: Optional[str] = None, *,
+          compiled: Optional[Compiled] = None,
+          path: Optional[str] = None,
+          overlay: Optional[dict[str, str]] = None,
+          include_dirs: Optional[list[str]] = None,
+          base_dir: Optional[str] = None) -> dict:
+    if isinstance(source, Compiled):
+        compiled = source
+    if compiled is None:
+        compiled = compile_source(source or "", path=path, overlay=overlay,
+                                  include_dirs=include_dirs, base_dir=base_dir)
+    cpp, types, linemap, sm = compiled.cpp, compiled.types, compiled.linemap, compiled.source_map
+    auto_workdir = workdir is None
     if workdir is None:
         workdir = tempfile.mkdtemp(prefix="homo_build_")
     cpp_path = os.path.join(workdir, "main.cpp")
     with open(cpp_path, "w", encoding="utf-8") as f:
         f.write(cpp)
     shutil.copyfile(RUNTIME_PATH, os.path.join(workdir, "homo_runtime.hpp"))
-    exe = os.path.join(workdir, "homo_program")
-    compiler = find_compiler()
+    exe = os.path.join(workdir, "homo_program.exe" if os.name == "nt" else "homo_program")
     try:
-        proc = subprocess.run(
-            [compiler, "-std=c++17", "-O0", "-o", exe, cpp_path],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=60,
-        )
+        compiler = find_compiler()
+        proc = _run_cpp_compiler(compiler, workdir, cpp_path, exe)
     except subprocess.TimeoutExpired:
         return {
             "ok": False, "cpp": cpp, "types": types, "linemap": linemap,
-            "compile_output": "编译超时（超过 60 秒）", "workdir": workdir, "exe": None,
+            "source_map": sm, "units": compiled.units, "diagnostics": [],
+            "compile_output": "编译超时（超过 120 秒）", "workdir": workdir, "exe": None,
+            "compiler": None,
         }
-    output = rewrite_diagnostics((proc.stdout or "") + (proc.stderr or ""), linemap).strip()
+    except HomoError:
+        if auto_workdir:
+            shutil.rmtree(workdir, ignore_errors=True)
+        raise
+    except OSError as exc:
+        return {
+            "ok": False, "cpp": cpp, "types": types, "linemap": linemap,
+            "source_map": sm, "units": compiled.units, "diagnostics": [],
+            "compile_output": f"无法启动 C++ 编译器：{exc}", "workdir": workdir,
+            "exe": None, "compiler": None,
+        }
+    raw_output = (proc.stdout or "") + (proc.stderr or "")
+    output = rewrite_diagnostics(raw_output, linemap, sm).strip()
     ok = proc.returncode == 0
+    if ok and not os.path.isfile(exe):
+        ok = False
+        output = (output + "\n编译器没有生成可执行文件").strip()
+    diagnostics = cpp_diagnostics(output, sm)
+    if not ok and not diagnostics:
+        diagnostics = [{
+            "severity": "错误", "file": "", "path": "", "line": 0, "column": 0,
+            "message": "C++ 编译失败（编译器没有给出可解析的错误信息）",
+        }]
     return {
         "ok": ok, "cpp": cpp, "types": types, "linemap": linemap,
+        "source_map": sm, "units": compiled.units, "diagnostics": diagnostics,
         "compile_output": output, "workdir": workdir, "exe": exe if ok else None,
+        "compiler": compiler.label,
     }
 
 
 def run(source: str, timeout: Optional[int] = 5, input_text: Optional[str] = "",
-        inherit_io: bool = False, on_start=None) -> dict:
-    result = build(source)
+        inherit_io: bool = False, on_start=None, *,
+        path: Optional[str] = None,
+        overlay: Optional[dict[str, str]] = None,
+        include_dirs: Optional[list[str]] = None,
+        base_dir: Optional[str] = None,
+        keep_workdir: bool = False) -> dict:
+    result = build(source, path=path, overlay=overlay, include_dirs=include_dirs,
+                   base_dir=base_dir)
     if not result["ok"]:
         result.update({"ran": False, "stdout": "", "stderr": "", "exit_code": None})
+        if not keep_workdir:
+            shutil.rmtree(result["workdir"], ignore_errors=True)
         return result
     if inherit_io:
         # 交互模式：直接继承终端，输出实时可见。
@@ -2257,6 +3350,8 @@ def run(source: str, timeout: Optional[int] = 5, input_text: Optional[str] = "",
                 "stderr": f"运行超时（超过 {timeout} 秒）",
                 "exit_code": None,
             })
+        if not keep_workdir:
+            shutil.rmtree(result["workdir"], ignore_errors=True)
         return result
 
     proc: Optional[subprocess.Popen] = None
@@ -2288,6 +3383,8 @@ def run(source: str, timeout: Optional[int] = 5, input_text: Optional[str] = "",
             "stderr": f"运行超时（超过 {timeout} 秒）",
             "exit_code": None,
         })
+    if not keep_workdir:
+        shutil.rmtree(result["workdir"], ignore_errors=True)
     return result
 
 
@@ -2299,28 +3396,50 @@ def main(argv: Optional[list[str]] = None) -> int:
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     if not sys.stdout.isatty():
         sys.stdout.reconfigure(encoding="utf-8")
-    ap = argparse.ArgumentParser(description="homo 语言编译器：homo → C++ → g++")
-    ap.add_argument("source", nargs="?", help="homo 源文件；不写则从标准输入读取")
+    ap = argparse.ArgumentParser(description="homo 语言编译器：homo → C++ → 原生程序")
+    ap.add_argument("source", nargs="?", help="homo 主源文件；不写则从标准输入读取")
     ap.add_argument("-o", "--output", help="把可执行文件复制到这个路径")
+    ap.add_argument("-I", "--include", action="append", default=[],
+                    help="import 的额外搜索目录，可以重复")
     ap.add_argument("--run", action="store_true", help="编译后立即运行")
+    ap.add_argument("--check", action="store_true", help="只做词法/语法/名字检查")
     ap.add_argument("--keep", action="store_true", help="保留生成的 C++ 构建目录")
     args = ap.parse_args(argv)
 
+    include_dirs = args.include
     if args.source:
-        with open(args.source, encoding="utf-8") as f:
-            src = f.read()
+        try:
+            with open(args.source, "rb") as f:
+                src = f.read().decode("utf-8-sig")
+        except OSError as exc:
+            print(f"读取源文件失败：{exc}", file=sys.stderr)
+            return 2
+        except UnicodeDecodeError as exc:
+            print(f"源文件不是 UTF-8 编码：{exc}", file=sys.stderr)
+            return 2
+        source_path = os.path.abspath(args.source)
     else:
         src = sys.stdin.read()
+        source_path = None
 
     try:
+        if args.check:
+            lint(src, path=source_path, include_dirs=include_dirs)
+            print("检查通过")
+            return 0
+
         if args.run:
             interactive = sys.stdin.isatty()
             timeout = None if interactive else 60
-            result = run(src, timeout=timeout, input_text=None, inherit_io=interactive)
+            result = run(src, timeout=timeout, input_text=None, inherit_io=interactive,
+                         path=source_path, include_dirs=include_dirs,
+                         keep_workdir=args.keep)
             if not result["ok"]:
                 print(result["compile_output"], file=sys.stderr)
                 if args.keep:
                     print(f"构建目录：{result['workdir']}", file=sys.stderr)
+                else:
+                    shutil.rmtree(result["workdir"], ignore_errors=True)
                 return 51
             sys.stdout.write(result["stdout"])
             if result["stderr"]:
@@ -2334,26 +3453,34 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 0 if code is None else code
 
         if args.output:
-            result = build(src)
+            result = build(src, path=source_path, include_dirs=include_dirs)
             if not result["ok"]:
                 print(result["compile_output"], file=sys.stderr)
                 if args.keep:
                     print(f"构建目录：{result['workdir']}", file=sys.stderr)
+                else:
+                    shutil.rmtree(result["workdir"], ignore_errors=True)
                 return 1
-            shutil.copyfile(result["exe"], args.output)
-            os.chmod(args.output, 0o755)
-            if not args.keep:
+            try:
+                shutil.copyfile(result["exe"], args.output)
+                if os.name != "nt":
+                    os.chmod(args.output, 0o755)
+            except OSError as exc:
+                print(f"写入可执行文件失败：{exc}", file=sys.stderr)
+                return 1
+            if args.keep:
+                print(f"构建目录：{result['workdir']}", file=sys.stderr)
+            else:
                 shutil.rmtree(result["workdir"], ignore_errors=True)
             print(f"已生成：{args.output}")
             return 0
 
-        cpp, _, _ = transpile(src)
-        sys.stdout.write(cpp)
+        compiled = compile_source(src, path=source_path, include_dirs=include_dirs)
+        sys.stdout.write(compiled.cpp)
         return 0
 
     except HomoError as e:
-        where = f"（第 {e.line} 行）" if e.line else ""
-        print(f"编译错误{where}：{e.msg}", file=sys.stderr)
+        print(f"编译错误：{format_error(e)}", file=sys.stderr)
         return 114
 
 
